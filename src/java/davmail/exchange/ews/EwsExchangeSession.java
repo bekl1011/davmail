@@ -64,6 +64,8 @@ import java.util.regex.Pattern;
 public class EwsExchangeSession extends ExchangeSession {
 
     protected static final int PAGE_SIZE = 500;
+    /** Keep DetailedMerged requests within Exchange's bounded availability window. */
+    protected static final int AVAILABILITY_QUERY_MAX_DAYS = 42;
 
     protected static final String ARCHIVE_ROOT = "/archive/";
 
@@ -2981,6 +2983,55 @@ public class EwsExchangeSession extends ExchangeSession {
             // ignore
         }
         return result;
+    }
+
+    /**
+     * Retrieve the detailed availability events Exchange exposes for a mailbox.
+     * This deliberately uses the current authenticated EWS session and endpoint.
+     *
+     * @param mailbox target mailbox
+     * @param start query window start
+     * @param end query window end
+     * @return availability calendar events
+     * @throws IOException on EWS or mailbox errors
+     */
+    public List<GetUserAvailabilityMethod.CalendarEvent> getAvailabilityEvents(String mailbox, Date start, Date end) throws IOException {
+        if (mailbox == null || mailbox.indexOf('@') <= 0 || mailbox.endsWith("@")) {
+            throw new HttpNotFoundException("Availability mailbox not found");
+        }
+        LinkedHashMap<String, GetUserAvailabilityMethod.CalendarEvent> events = new LinkedHashMap<>();
+        Calendar chunkStart = Calendar.getInstance(GMT_TIMEZONE);
+        chunkStart.setTime(start);
+        while (chunkStart.getTime().before(end)) {
+            Calendar chunkEnd = (Calendar) chunkStart.clone();
+            chunkEnd.add(Calendar.DAY_OF_MONTH, AVAILABILITY_QUERY_MAX_DAYS);
+            if (chunkEnd.getTime().after(end)) {
+                chunkEnd.setTime(end);
+            }
+            for (GetUserAvailabilityMethod.CalendarEvent event :
+                    getAvailabilityEventsChunk(mailbox, chunkStart.getTime(), chunkEnd.getTime())) {
+                String key = String.valueOf(event.getId()) + '\n' + event.getStart() + '\n' + event.getEnd();
+                events.put(key, event);
+            }
+            chunkStart.setTime(chunkEnd.getTime());
+        }
+        return new ArrayList<>(events.values());
+    }
+
+    private List<GetUserAvailabilityMethod.CalendarEvent> getAvailabilityEventsChunk(
+            String mailbox, Date start, Date end) throws IOException {
+        SimpleDateFormat formatter = getExchangeZuluDateFormat();
+        GetUserAvailabilityMethod method = new GetUserAvailabilityMethod(
+                mailbox, formatter.format(start), formatter.format(end), FREE_BUSY_INTERVAL, true);
+        executeMethod(method);
+        if ("ErrorMailRecipientNotFound".equals(method.errorDetail)
+                || "ErrorInvalidSmtpAddress".equals(method.errorDetail)) {
+            throw new HttpNotFoundException("Availability mailbox not found");
+        }
+        if (method.errorDetail != null) {
+            throw new EWSException("GetUserAvailability failed: " + method.errorDetail);
+        }
+        return new ArrayList<>(method.getCalendarEvents());
     }
 
     @Override

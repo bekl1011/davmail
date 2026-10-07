@@ -163,6 +163,11 @@ davmail.caldavAlarmSound=
 davmail.caldavPastDelay=90
 # EWS only: enable server managed meeting notifications
 davmail.caldavAutoSchedule=true
+# EWS only: expose GetUserAvailability(DetailedMerged) as a read-only ICS feed
+davmail.enableAvailabilityCalendar=false
+# Availability feed query window; large windows are split into bounded EWS requests
+davmail.availabilityCalendarPastDays=90
+davmail.availabilityCalendarFutureDays=365
 # WebDav only: force event update to trigger ActiveSync clients update
 davmail.forceActiveSyncUpdate=false
 
@@ -195,6 +200,11 @@ davmail.forceActiveSyncUpdate=false
 
 # Automatically create a Teams online meeting
 #davmail.caldav.enableOnlineMeeting=true
+
+# Some Exchange configurations allow detailed shared-calendar data through
+# GetUserAvailability(DetailedMerged) but deny FindItem on the shared folder.
+# After enabling the setting above, subscribe read-only clients to:
+# http://localhost:&lt;caldav-port&gt;/users/&lt;mailbox&gt;/calendar-availability.ics
 
 #############################################################
 # IMAP settings

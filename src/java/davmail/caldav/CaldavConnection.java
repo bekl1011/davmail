@@ -32,6 +32,8 @@ import davmail.exchange.ICSBufferedReader;
 import davmail.exchange.NetworkDownException;
 import davmail.exchange.XMLStreamUtil;
 import davmail.exchange.dav.DavExchangeSession;
+import davmail.exchange.ews.EwsExchangeSession;
+import davmail.exchange.ews.GetUserAvailabilityMethod;
 import davmail.http.URIUtil;
 import davmail.ui.tray.DavGatewayTray;
 import davmail.util.IOUtil;
@@ -59,6 +61,7 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.BitSet;
+import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -250,7 +253,14 @@ public class CaldavConnection extends AbstractConnection {
         } else if (request.isPath(1, "principals")) {
             handlePrincipals(request);
         } else if (request.isPath(1, "users")) {
-            if (request.isPropFind() && request.isPathLength(3)) {
+            if (request.isAvailabilityCalendar()) {
+                if (Settings.getBooleanProperty("davmail.enableAvailabilityCalendar")
+                        && (request.isGet() || request.isHead())) {
+                    sendAvailabilityCalendar(request);
+                } else {
+                    sendNotFound(request);
+                }
+            } else if (request.isPropFind() && request.isPathLength(3)) {
                 sendUserRoot(request);
             } else {
                 handleFolderOrItem(request);
@@ -264,6 +274,49 @@ public class CaldavConnection extends AbstractConnection {
         } else {
             sendNotFound(request);
         }
+    }
+
+    /**
+     * Send an EWS DetailedMerged availability calendar as a read-only ICS feed.
+     * Some Exchange deployments allow this API while denying FindItem on a
+     * shared calendar.
+     *
+     * @param request CalDAV request
+     * @throws IOException on response errors
+     */
+    protected void sendAvailabilityCalendar(CaldavRequest request) throws IOException {
+        if (!(session instanceof EwsExchangeSession)) {
+            sendNotFound(request);
+            return;
+        }
+
+        String mailbox = request.getAvailabilityMailbox();
+        Date generatedAt = new Date();
+        Calendar start = Calendar.getInstance(ExchangeSession.GMT_TIMEZONE);
+        start.setTime(generatedAt);
+        start.add(Calendar.DAY_OF_MONTH,
+                -Math.max(0, Settings.getIntProperty("davmail.availabilityCalendarPastDays", 90)));
+        Calendar end = Calendar.getInstance(ExchangeSession.GMT_TIMEZONE);
+        end.setTime(generatedAt);
+        end.add(Calendar.DAY_OF_MONTH,
+                Math.max(0, Settings.getIntProperty("davmail.availabilityCalendarFutureDays", 365)));
+
+        final List<GetUserAvailabilityMethod.CalendarEvent> events;
+        final String calendarBody;
+        try {
+            events = ((EwsExchangeSession) session).getAvailabilityEvents(mailbox, start.getTime(), end.getTime());
+            calendarBody = AvailabilityCalendar.build(mailbox, events, generatedAt);
+        } catch (HttpNotFoundException e) {
+            sendErr(HttpStatus.SC_NOT_FOUND, "Availability mailbox not found");
+            return;
+        } catch (IOException e) {
+            wireLogger.warn("Unable to retrieve EWS availability calendar for " + mailbox, e);
+            sendErr(HttpStatus.SC_SERVICE_UNAVAILABLE, "Unable to retrieve availability calendar");
+            return;
+        }
+
+        byte[] content = request.isHead() ? null : calendarBody.getBytes(StandardCharsets.UTF_8);
+        sendHttpResponse(HttpStatus.SC_OK, null, "text/calendar; charset=UTF-8", content, true);
     }
 
     protected void handlePrincipals(CaldavRequest request) throws IOException {
@@ -1479,6 +1532,16 @@ public class CaldavConnection extends AbstractConnection {
 
         public boolean isMove() {
             return "MOVE".equals(command);
+        }
+
+        public boolean isAvailabilityCalendar() {
+            return isPathLength(4) && isPath(1, "users")
+                    && isPath(3, "calendar-availability.ics");
+        }
+
+        public String getAvailabilityMailbox() {
+            // The connection URI-decodes the request path before constructing this request.
+            return isAvailabilityCalendar() ? getPathElement(2) : null;
         }
 
         /**

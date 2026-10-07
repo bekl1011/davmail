@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+            xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages"
+            xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
+  <s:Body>
+    <m:GetUserAvailabilityResponse>
+      <m:FreeBusyResponseArray>
+        <m:FreeBusyResponse>
+          <m:ResponseMessage ResponseClass="Success">
+            <m:ResponseCode>NoError</m:ResponseCode>
+          </m:ResponseMessage>
+          <m:FreeBusyView>
+            <t:CalendarEventArray>
+              <t:CalendarEvent>
+                <t:StartTime>2026-10-01T08:00:00</t:StartTime>
+                <t:EndTime>2026-10-01T09:00:00</t:EndTime>
+                <t:BusyType>Busy</t:BusyType>
+                <t:CalendarEventDetails>
+                  <t:ID>AAMkAGeneral</t:ID>
+                  <t:Subject>Plan, review; path\share&#10;Überblick</t:Subject>
+                  <t:Location>Room, 1; West\Wing</t:Location>
+                  <t:IsMeeting>true</t:IsMeeting>
+                  <t:IsRecurring>false</t:IsRecurring>
+                  <t:IsException>false</t:IsException>
+                  <t:IsPrivate>false</t:IsPrivate>
+                </t:CalendarEventDetails>
+              </t:CalendarEvent>
+              <t:CalendarEvent>
+                <t:StartTime>2026-10-02T10:00:00Z</t:StartTime>
+                <t:EndTime>2026-10-02T11:00:00Z</t:EndTime>
+                <t:BusyType>Free</t:BusyType>
+              </t:CalendarEvent>
+              <t:CalendarEvent>
+                <t:StartTime>2026-10-03T12:00:00+00:00</t:StartTime>
+                <t:EndTime>2026-10-03T13:00:00+00:00</t:EndTime>
+                <t:BusyType>OOF</t:BusyType>
+                <t:CalendarEventDetails>
+                  <t:ID>AAMkAPrivate</t:ID>
+                  <t:IsMeeting>false</t:IsMeeting>
+                  <t:IsRecurring>false</t:IsRecurring>
+                  <t:IsException>false</t:IsException>
+                  <t:IsPrivate>true</t:IsPrivate>
+                </t:CalendarEventDetails>
+              </t:CalendarEvent>
+              <t:CalendarEvent>
+                <t:StartTime>2026-10-04T14:00:00</t:StartTime>
+                <t:EndTime>2026-10-04T15:00:00</t:EndTime>
+                <t:BusyType>Tentative</t:BusyType>
+                <t:CalendarEventDetails>
+                  <t:ID>AAMkARecurring</t:ID>
+                  <t:Subject>Weekly sync</t:Subject>
+                  <t:IsMeeting>true</t:IsMeeting>
+                  <t:IsRecurring>true</t:IsRecurring>
+                  <t:IsException>false</t:IsException>
+                  <t:IsPrivate>false</t:IsPrivate>
+                </t:CalendarEventDetails>
+              </t:CalendarEvent>
+            </t:CalendarEventArray>
+          </m:FreeBusyView>
+        </m:FreeBusyResponse>
+      </m:FreeBusyResponseArray>
+    </m:GetUserAvailabilityResponse>
+  </s:Body>
+</s:Envelope>

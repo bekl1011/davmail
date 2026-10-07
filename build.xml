@@ -211,6 +211,8 @@
                     <fileset dir="src/test" includes="davmail/exchange/TestExchangeSessionContact.java"/>
                     <fileset dir="src/test" includes="davmail/exchange/TestO365EWSExchangeSessionContact.java"/>
                     <fileset dir="src/test" includes="davmail/exchange/TestExchangeSessionCalendar.java"/>
+                    <fileset dir="src/test" includes="davmail/exchange/ews/TestGetUserAvailabilityMethod.java"/>
+                    <fileset dir="src/test" includes="davmail/caldav/TestAvailabilityCalendar.java"/>
                     <fileset dir="src/test" includes="davmail/util/*.java"/>
                 </batchtest>
             </junit>
@@ -268,6 +270,7 @@
         <copy file="src/osx/tray.icns" todir="dist/DavMail.app/Contents/Resources" overwrite="true"/>
         <!-- use generic app launcher -->
         <copy file="src/osx/davmail" todir="dist/DavMail.app/Contents/MacOS" overwrite="true"/>
+        <chmod file="dist/DavMail.app/Contents/MacOS/davmail" perm="755"/>
         <!-- template plist -->
         <copy file="src/osx/Info.plist" todir="dist/DavMail.app/Contents" overwrite="true">
             <filterchain>

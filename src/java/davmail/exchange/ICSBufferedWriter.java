@@ -100,6 +100,40 @@ public class ICSBufferedWriter {
     }
 
     /**
+     * Append an RFC 5545 TEXT property, escaping reserved characters before
+     * applying the writer's normal line folding.
+     *
+     * @param propertyName property name
+     * @param propertyValue unescaped text value
+     */
+    public void appendTextProperty(String propertyName, String propertyValue) {
+        if (propertyValue != null && !propertyValue.isEmpty()) {
+            appendProperty(propertyName, encodeTextValue(propertyValue));
+        }
+    }
+
+    /**
+     * Escape an RFC 5545 TEXT value.
+     *
+     * @param value raw text
+     * @return escaped text
+     */
+    public static String encodeTextValue(String value) {
+        StringBuilder encoded = new StringBuilder();
+        for (int i = 0; i < value.length(); i++) {
+            char current = value.charAt(i);
+            if (current == '\\' || current == ';' || current == ',') {
+                encoded.append('\\').append(current);
+            } else if (current == '\n') {
+                encoded.append("\\n");
+            } else if (current != '\r') {
+                encoded.append(current);
+            }
+        }
+        return encoded.toString();
+    }
+
+    /**
      * Append and encode \n to \\n in value.
      *
      * @param buffer line buffer
