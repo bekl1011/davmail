@@ -1,0 +1,29 @@
+[Unit]
+Description=DavMail Exchange gateway
+Documentation=https://davmail.sourceforge.net/serversetup.html
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=davmail
+Group=davmail
+WorkingDirectory=/var/lib/davmail
+Environment=BASE_JAVA_OPTS=-Xms32M -Xmx256M -Djava.awt.headless=true -Dsun.net.inetaddr.ttl=60
+ExecStart=/opt/davmail/davmail /etc/davmail/davmail.properties -notray
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/davmail /etc/davmail
+ReadWritePaths=/var/lib/davmail /var/log/davmail
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

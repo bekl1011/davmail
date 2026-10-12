@@ -35,6 +35,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStreamWriter;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -42,6 +44,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.FileAttribute;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.Map;
@@ -256,7 +259,9 @@ public final class Settings {
         SETTINGS_PROPERTIES.put("davmail.ssl.keystoreType", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.keystoreFile", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.keystorePass", "");
+        SETTINGS_PROPERTIES.put("davmail.ssl.keystorePassFile", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.keyPass", "");
+        SETTINGS_PROPERTIES.put("davmail.ssl.keyPassFile", "");
         if (isWindows()) {
             // default to MSCAPI on Windows for native client certificate access
             SETTINGS_PROPERTIES.put("davmail.ssl.clientKeystoreType", "MSCAPI");
@@ -265,6 +270,8 @@ public final class Settings {
         }
         SETTINGS_PROPERTIES.put("davmail.ssl.clientKeystoreFile", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.clientKeystorePass", "");
+        SETTINGS_PROPERTIES.put("davmail.ssl.clientKeystorePassFile", "");
+        SETTINGS_PROPERTIES.put("davmail.ssl.clientCertificateAlias", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.pkcs11Library", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.pkcs11Config", "");
         SETTINGS_PROPERTIES.put("davmail.ssl.nosecurepop", Boolean.FALSE.toString());
@@ -572,6 +579,44 @@ public final class Settings {
             value = propertyValue.toCharArray();
         }
         return value;
+    }
+
+    /**
+     * Get a secret from an inline property or, when the inline value is empty,
+     * from a UTF-8 file. A final CR/LF written by common secret-management
+     * tools is ignored; all other characters are preserved.
+     *
+     * @param property inline property name
+     * @param fileProperty property containing the secret file path
+     * @return secret value or null when neither property is configured
+     * @throws IOException when the configured secret file cannot be read or decoded
+     */
+    public static synchronized char[] getCharArrayProperty(String property, String fileProperty)
+            throws IOException {
+        char[] inlineValue = getCharArrayProperty(property);
+        if (inlineValue != null) {
+            return inlineValue;
+        }
+        String filePath = getProperty(fileProperty);
+        if (filePath == null) {
+            return null;
+        }
+
+        byte[] encodedValue = Files.readAllBytes(Paths.get(filePath));
+        try {
+            int length = encodedValue.length;
+            while (length > 0
+                    && (encodedValue[length - 1] == '\n' || encodedValue[length - 1] == '\r')) {
+                length--;
+            }
+            CharBuffer decodedValue = StandardCharsets.UTF_8.newDecoder()
+                    .decode(ByteBuffer.wrap(encodedValue, 0, length));
+            char[] value = new char[decodedValue.remaining()];
+            decodedValue.get(value);
+            return value;
+        } finally {
+            Arrays.fill(encodedValue, (byte) 0);
+        }
     }
 
     /**

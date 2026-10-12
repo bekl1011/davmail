@@ -30,6 +30,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.*;
 import java.security.cert.CertificateException;
+import java.util.Arrays;
 import java.util.HashSet;
 
 /**
@@ -166,11 +167,24 @@ public abstract class AbstractServer extends Thread {
         }
         try (FileInputStream keyStoreInputStream = new FileInputStream(keystoreFile)) {
             KeyStore keystore = KeyStore.getInstance(Settings.getProperty("davmail.ssl.keystoreType"));
-            keystore.load(keyStoreInputStream, Settings.getCharArrayProperty("davmail.ssl.keystorePass"));
+            char[] keystorePassword = Settings.getCharArrayProperty("davmail.ssl.keystorePass",
+                    "davmail.ssl.keystorePassFile");
+            char[] keyPassword = Settings.getCharArrayProperty("davmail.ssl.keyPass",
+                    "davmail.ssl.keyPassFile");
+            try {
+                keystore.load(keyStoreInputStream, keystorePassword);
 
-            KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
-            kmf.init(keystore, Settings.getCharArrayProperty("davmail.ssl.keyPass"));
-            return kmf.getKeyManagers();
+                KeyManagerFactory kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+                kmf.init(keystore, keyPassword);
+                return kmf.getKeyManagers();
+            } finally {
+                if (keystorePassword != null) {
+                    Arrays.fill(keystorePassword, '\0');
+                }
+                if (keyPassword != null) {
+                    Arrays.fill(keyPassword, '\0');
+                }
+            }
         }
     }
 

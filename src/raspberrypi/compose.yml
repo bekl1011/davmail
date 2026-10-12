@@ -1,0 +1,35 @@
+# Docker is not supported on the ARMv6 Raspberry Pi 1. Use this file on an
+# amd64, arm64, or supported ARMv7 host and build this fork locally.
+services:
+  davmail:
+    container_name: davmail
+    hostname: davmail
+    build:
+      context: ../..
+      dockerfile: src/docker/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${DAVMAIL_BIND_IP:-127.0.0.1}:1080:1080" # CalDAV over TLS
+      - "${DAVMAIL_BIND_IP:-127.0.0.1}:1143:1143" # IMAP over TLS
+      - "${DAVMAIL_BIND_IP:-127.0.0.1}:1025:1025" # SMTP over TLS
+    volumes:
+      - ./config:/config
+    secrets:
+      - source: client_p12
+        target: client.p12
+      - source: client_p12_password
+        target: client-p12-password
+      - source: server_p12
+        target: server.p12
+      - source: server_p12_password
+        target: server-p12-password
+
+secrets:
+  client_p12:
+    file: ./secrets/client.p12
+  client_p12_password:
+    file: ./secrets/client-p12-password
+  server_p12:
+    file: ./secrets/server.p12
+  server_p12_password:
+    file: ./secrets/server-p12-password

@@ -213,6 +213,8 @@
                     <fileset dir="src/test" includes="davmail/exchange/TestExchangeSessionCalendar.java"/>
                     <fileset dir="src/test" includes="davmail/exchange/ews/TestGetUserAvailabilityMethod.java"/>
                     <fileset dir="src/test" includes="davmail/caldav/TestAvailabilityCalendar.java"/>
+                    <fileset dir="src/test" includes="davmail/TestSettingsPasswordFile.java"/>
+                    <fileset dir="src/test" includes="davmail/http/TestMacOSKeychainClientKeyStore.java"/>
                     <fileset dir="src/test" includes="davmail/util/*.java"/>
                 </batchtest>
             </junit>
@@ -471,6 +473,23 @@
                 <exclude name="test.properties"/>
             </tarfileset>
         </tar>
+    </target>
+
+    <!-- Platform-independent archive only; useful for small headless systems and avoids downloading bundled JREs. -->
+    <target name="dist-platform" depends="prepare-dist">
+        <zip file="dist/davmail-${release-name}.zip">
+            <zipfileset dir="dist">
+                <include name="lib/*.jar"/>
+                <include name="*.jar"/>
+                <exclude name="lib/swt*.jar"/>
+                <exclude name="lib/junit-*.jar"/>
+                <exclude name="lib/hamcrest-core-*.jar"/>
+                <exclude name="lib/winrun4j-*.jar"/>
+            </zipfileset>
+            <zipfileset dir="src/bin" filemode="755">
+                <include name="davmail"/>
+            </zipfileset>
+        </zip>
     </target>
 
     <target name='fix-site'>

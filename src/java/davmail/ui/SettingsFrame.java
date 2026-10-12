@@ -75,11 +75,15 @@ public class SettingsFrame extends JFrame {
     protected JComboBox<String> keystoreTypeCombo;
     protected JTextField keystoreFileField;
     protected JPasswordField keystorePassField;
+    protected JTextField keystorePassFileField;
     protected JPasswordField keyPassField;
+    protected JTextField keyPassFileField;
 
     protected JComboBox<String> clientKeystoreTypeCombo;
     protected JTextField clientKeystoreFileField;
     protected JPasswordField clientKeystorePassField;
+    protected JTextField clientKeystorePassFileField;
+    protected JTextField clientCertificateAliasField;
     protected JTextField pkcs11LibraryField;
     protected JTextArea pkcs11ConfigField;
 
@@ -346,14 +350,16 @@ public class SettingsFrame extends JFrame {
     }
 
     protected JPanel getKeystorePanel() {
-        JPanel keyStorePanel = new JPanel(new GridLayout(4, 2));
+        JPanel keyStorePanel = new JPanel(new GridLayout(6, 2));
         keyStorePanel.setBorder(BorderFactory.createTitledBorder(BundleMessage.format("UI_DAVMAIL_SERVER_CERTIFICATE")));
 
         keystoreTypeCombo = new JComboBox<>(new String[]{"JKS", "PKCS12"});
         keystoreTypeCombo.setSelectedItem(Settings.getProperty("davmail.ssl.keystoreType"));
         keystoreFileField = new JTextField(Settings.getProperty("davmail.ssl.keystoreFile"), 20);
         keystorePassField = new JPasswordField(Settings.getProperty("davmail.ssl.keystorePass"), 20);
+        keystorePassFileField = new JTextField(Settings.getProperty("davmail.ssl.keystorePassFile"), 20);
         keyPassField = new JPasswordField(Settings.getProperty("davmail.ssl.keyPass"), 20);
+        keyPassFileField = new JTextField(Settings.getProperty("davmail.ssl.keyPassFile"), 20);
 
         addSettingComponent(keyStorePanel, BundleMessage.format("UI_KEY_STORE_TYPE"), keystoreTypeCombo,
                 BundleMessage.format("UI_KEY_STORE_TYPE_HELP"));
@@ -361,8 +367,12 @@ public class SettingsFrame extends JFrame {
                 BundleMessage.format("UI_KEY_STORE_HELP"));
         addSettingComponent(keyStorePanel, BundleMessage.format("UI_KEY_STORE_PASSWORD"), keystorePassField,
                 BundleMessage.format("UI_KEY_STORE_PASSWORD_HELP"));
+        addSettingComponent(keyStorePanel, BundleMessage.format("UI_KEY_STORE_PASSWORD_FILE"), keystorePassFileField,
+                BundleMessage.format("UI_KEY_STORE_PASSWORD_FILE_HELP"));
         addSettingComponent(keyStorePanel, BundleMessage.format("UI_KEY_PASSWORD"), keyPassField,
                 BundleMessage.format("UI_KEY_PASSWORD_HELP"));
+        addSettingComponent(keyStorePanel, BundleMessage.format("UI_KEY_PASSWORD_FILE"), keyPassFileField,
+                BundleMessage.format("UI_KEY_PASSWORD_FILE_HELP"));
         updateMaximumSize(keyStorePanel);
         return keyStorePanel;
     }
@@ -374,12 +384,21 @@ public class SettingsFrame extends JFrame {
 
         if (System.getProperty("os.name").toLowerCase().startsWith("windows")) {
             clientKeystoreTypeCombo = new JComboBox<>(new String[]{"MSCAPI", "PKCS11", "JKS", "PKCS12"});
+        } else if (Settings.isOSX()) {
+            clientKeystoreTypeCombo = new JComboBox<>(new String[]{"KeychainStore", "PKCS11", "JKS", "PKCS12"});
         } else {
             clientKeystoreTypeCombo = new JComboBox<>(new String[]{"PKCS11", "JKS", "PKCS12"});
         }
         clientKeystoreTypeCombo.setSelectedItem(Settings.getProperty("davmail.ssl.clientKeystoreType"));
-        clientKeystoreFileField = new JTextField(Settings.getProperty("davmail.ssl.clientKeystoreFile"), 20);
-        clientKeystorePassField = new JPasswordField(Settings.getProperty("davmail.ssl.clientKeystorePass"), 20);
+        boolean keychainStore = "KeychainStore".equals(clientKeystoreTypeCombo.getSelectedItem());
+        clientKeystoreFileField = new JTextField(keychainStore
+                ? "" : Settings.getProperty("davmail.ssl.clientKeystoreFile"), 20);
+        clientKeystorePassField = new JPasswordField(keychainStore
+                ? "" : Settings.getProperty("davmail.ssl.clientKeystorePass"), 20);
+        clientKeystorePassFileField = new JTextField(keychainStore
+                ? "" : Settings.getProperty("davmail.ssl.clientKeystorePassFile"), 20);
+        clientCertificateAliasField = new JTextField(
+                Settings.getProperty("davmail.ssl.clientCertificateAlias"), 20);
 
         pkcs11LibraryField = new JTextField(Settings.getProperty("davmail.ssl.pkcs11Library"), 20);
         pkcs11ConfigField = new JTextArea(2, 20);
@@ -395,11 +414,15 @@ public class SettingsFrame extends JFrame {
         final JPanel cardPanel = new JPanel(new CardLayout());
         clientKeystorePanel.add(cardPanel);
 
-        JPanel clientKeystoreFilePanel = new JPanel(new GridLayout(2, 2));
+        JPanel clientKeystoreFilePanel = new JPanel(new GridLayout(4, 2));
         addSettingComponent(clientKeystoreFilePanel, BundleMessage.format("UI_CLIENT_KEY_STORE"), clientKeystoreFileField,
                 BundleMessage.format("UI_CLIENT_KEY_STORE_HELP"));
         addSettingComponent(clientKeystoreFilePanel, BundleMessage.format("UI_CLIENT_KEY_STORE_PASSWORD"), clientKeystorePassField,
                 BundleMessage.format("UI_CLIENT_KEY_STORE_PASSWORD_HELP"));
+        addSettingComponent(clientKeystoreFilePanel, BundleMessage.format("UI_CLIENT_KEY_STORE_PASSWORD_FILE"), clientKeystorePassFileField,
+                BundleMessage.format("UI_CLIENT_KEY_STORE_PASSWORD_FILE_HELP"));
+        addSettingComponent(clientKeystoreFilePanel, BundleMessage.format("UI_CLIENT_CERTIFICATE_ALIAS"), clientCertificateAliasField,
+                BundleMessage.format("UI_CLIENT_CERTIFICATE_ALIAS_HELP"));
         JPanel wrapperPanel = new JPanel();
         wrapperPanel.add(clientKeystoreFilePanel);
         cardPanel.add(wrapperPanel, "FILE");
@@ -411,18 +434,21 @@ public class SettingsFrame extends JFrame {
                 BundleMessage.format("UI_PKCS11_CONFIG_HELP"));
         cardPanel.add(pkcs11Panel, "PKCS11");
 
-        ((CardLayout) cardPanel.getLayout()).show(cardPanel, (String) clientKeystoreTypeCombo.getSelectedItem());
+        updateClientKeystorePanel(cardPanel);
 
-        clientKeystoreTypeCombo.addItemListener(event -> {
-            CardLayout cardLayout = (CardLayout) (cardPanel.getLayout());
-            if ("PKCS11".equals(event.getItem())) {
-                cardLayout.show(cardPanel, "PKCS11");
-            } else {
-                cardLayout.show(cardPanel, "FILE");
-            }
-        });
+        clientKeystoreTypeCombo.addItemListener(event -> updateClientKeystorePanel(cardPanel));
         updateMaximumSize(clientKeystorePanel);
         return clientKeystorePanel;
+    }
+
+    private void updateClientKeystorePanel(JPanel cardPanel) {
+        String keyStoreType = (String) clientKeystoreTypeCombo.getSelectedItem();
+        CardLayout cardLayout = (CardLayout) cardPanel.getLayout();
+        cardLayout.show(cardPanel, "PKCS11".equals(keyStoreType) ? "PKCS11" : "FILE");
+        boolean fileKeystore = !"KeychainStore".equals(keyStoreType);
+        clientKeystoreFileField.setEnabled(fileKeystore);
+        clientKeystorePassField.setEnabled(fileKeystore);
+        clientKeystorePassFileField.setEnabled(fileKeystore);
     }
 
     protected JPanel getOauthPanel() {
@@ -692,9 +718,21 @@ public class SettingsFrame extends JFrame {
         keystoreTypeCombo.setSelectedItem(Settings.getProperty("davmail.ssl.keystoreType"));
         keystoreFileField.setText(Settings.getProperty("davmail.ssl.keystoreFile"));
         keystorePassField.setText(Settings.getProperty("davmail.ssl.keystorePass"));
+        keystorePassFileField.setText(Settings.getProperty("davmail.ssl.keystorePassFile"));
         keyPassField.setText(Settings.getProperty("davmail.ssl.keyPass"));
+        keyPassFileField.setText(Settings.getProperty("davmail.ssl.keyPassFile"));
 
         clientKeystoreTypeCombo.setSelectedItem(Settings.getProperty("davmail.ssl.clientKeystoreType"));
+        if ("KeychainStore".equals(clientKeystoreTypeCombo.getSelectedItem())) {
+            clientKeystoreFileField.setText("");
+            clientKeystorePassField.setText("");
+            clientKeystorePassFileField.setText("");
+        } else {
+            clientKeystoreFileField.setText(Settings.getProperty("davmail.ssl.clientKeystoreFile"));
+            clientKeystorePassField.setText(Settings.getProperty("davmail.ssl.clientKeystorePass"));
+            clientKeystorePassFileField.setText(Settings.getProperty("davmail.ssl.clientKeystorePassFile"));
+        }
+        clientCertificateAliasField.setText(Settings.getProperty("davmail.ssl.clientCertificateAlias"));
         pkcs11LibraryField.setText(Settings.getProperty("davmail.ssl.pkcs11Library"));
         pkcs11ConfigField.setText(Settings.getProperty("davmail.ssl.pkcs11Config"));
 
@@ -873,11 +911,24 @@ public class SettingsFrame extends JFrame {
             Settings.setProperty("davmail.ssl.keystoreType", (String) keystoreTypeCombo.getSelectedItem());
             Settings.setProperty("davmail.ssl.keystoreFile", keystoreFileField.getText());
             Settings.setProperty("davmail.ssl.keystorePass", String.valueOf(keystorePassField.getPassword()));
+            Settings.setProperty("davmail.ssl.keystorePassFile", keystorePassFileField.getText());
             Settings.setProperty("davmail.ssl.keyPass", String.valueOf(keyPassField.getPassword()));
+            Settings.setProperty("davmail.ssl.keyPassFile", keyPassFileField.getText());
 
-            Settings.setProperty("davmail.ssl.clientKeystoreType", (String) clientKeystoreTypeCombo.getSelectedItem());
-            Settings.setProperty("davmail.ssl.clientKeystoreFile", clientKeystoreFileField.getText());
-            Settings.setProperty("davmail.ssl.clientKeystorePass", String.valueOf(clientKeystorePassField.getPassword()));
+            String clientKeystoreType = (String) clientKeystoreTypeCombo.getSelectedItem();
+            Settings.setProperty("davmail.ssl.clientKeystoreType", clientKeystoreType);
+            if ("KeychainStore".equals(clientKeystoreType)) {
+                Settings.setProperty("davmail.ssl.clientKeystoreFile", "");
+                Settings.setProperty("davmail.ssl.clientKeystorePass", "");
+                Settings.setProperty("davmail.ssl.clientKeystorePassFile", "");
+                clientKeystorePassField.setText("");
+                clientKeystorePassFileField.setText("");
+            } else {
+                Settings.setProperty("davmail.ssl.clientKeystoreFile", clientKeystoreFileField.getText());
+                Settings.setProperty("davmail.ssl.clientKeystorePass", String.valueOf(clientKeystorePassField.getPassword()));
+                Settings.setProperty("davmail.ssl.clientKeystorePassFile", clientKeystorePassFileField.getText());
+            }
+            Settings.setProperty("davmail.ssl.clientCertificateAlias", clientCertificateAliasField.getText());
             Settings.setProperty("davmail.ssl.pkcs11Library", pkcs11LibraryField.getText());
             Settings.setProperty("davmail.ssl.pkcs11Config", pkcs11ConfigField.getText());
 

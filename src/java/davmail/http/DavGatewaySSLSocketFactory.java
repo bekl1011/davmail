@@ -45,6 +45,8 @@ import java.security.KeyStore;
 import java.security.KeyStoreException;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.function.Supplier;
 
 /**
  * SSLSocketFactory implementation.
@@ -52,6 +54,7 @@ import java.util.ArrayList;
  */
 public class DavGatewaySSLSocketFactory extends SSLSocketFactory {
     static final Logger LOGGER = Logger.getLogger(DavGatewaySSLSocketFactory.class);
+    public static final String CLIENT_CERTIFICATE_ALIAS_PROPERTY = "davmail.ssl.clientCertificateAlias";
 
     private SSLContext sslcontext;
 
@@ -71,6 +74,9 @@ public class DavGatewaySSLSocketFactory extends SSLSocketFactory {
         if (clientKeystoreType == null || clientKeystoreType.isEmpty()) {
             clientKeystoreType = "PKCS11";
         }
+        String clientCertificateAlias = Settings.getProperty(CLIENT_CERTIFICATE_ALIAS_PROPERTY);
+        ClientKeyStoreProvider nativeKeyStoreProvider =
+                ClientKeyStoreProviderFactory.create(clientKeystoreType, clientCertificateAlias);
 
         if (pkcs11Library != null && !pkcs11Library.isEmpty() && "PKCS11".equals(clientKeystoreType)) {
             StringBuilder pkcs11Buffer = new StringBuilder();
@@ -91,19 +97,16 @@ public class DavGatewaySSLSocketFactory extends SSLSocketFactory {
         KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(algorithm);
 
         ArrayList<KeyStore.Builder> keyStoreBuilders = new ArrayList<>();
-        // PKCS11 (smartcard) keystore with password callback
-        KeyStore.Builder scBuilder = KeyStore.Builder.newInstance("PKCS11", null, getProtectionParameter(null));
-        keyStoreBuilders.add(scBuilder);
-
-        String clientKeystoreFile = Settings.getProperty("davmail.ssl.clientKeystoreFile");
-        String clientKeystorePass = Settings.getProperty("davmail.ssl.clientKeystorePass");
-        if (clientKeystoreFile != null && !clientKeystoreFile.isEmpty()
-                && ("PKCS12".equals(clientKeystoreType) || "JKS".equals(clientKeystoreType))) {
-            // PKCS12 file based keystore
-            KeyStore.Builder fsBuilder = KeyStore.Builder.newInstance(clientKeystoreType, null,
-                    new File(clientKeystoreFile), getProtectionParameter(clientKeystorePass));
-            keyStoreBuilders.add(fsBuilder);
+        if (nativeKeyStoreProvider == null) {
+            // Preserve the existing PKCS11 smartcard builder for all legacy modes.
+            KeyStore.Builder scBuilder = KeyStore.Builder.newInstance(
+                    "PKCS11", null, getProtectionParameter(null));
+            keyStoreBuilders.add(scBuilder);
         }
+        addConfiguredClientKeyStore(keyStoreBuilders, clientKeystoreType,
+                nativeKeyStoreProvider,
+                () -> Settings.getProperty("davmail.ssl.clientKeystoreFile"),
+                this::getClientKeystoreProtectionParameter);
         // Enable native Windows SmartCard access through MSCAPI (no PKCS11 config required)
         if ("MSCAPI".equals(clientKeystoreType)) {
             try {
@@ -128,13 +131,60 @@ public class DavGatewaySSLSocketFactory extends SSLSocketFactory {
         for (int i = 0; i < keyManagers.length; i++) {
             KeyManager keyManager = keyManagers[i];
             if (keyManager instanceof X509KeyManager) {
-                keyManagers[i] = new DavMailX509KeyManager((X509KeyManager) keyManager);
+                keyManagers[i] = new DavMailX509KeyManager(
+                        (X509KeyManager) keyManager, clientCertificateAlias,
+                        nativeKeyStoreProvider != null);
             }
         }
 
         SSLContext context = SSLContext.getInstance("TLS");
         context.init(keyManagers, new TrustManager[]{new DavGatewayX509TrustManager()}, null);
         return context;
+    }
+
+    static void addConfiguredClientKeyStore(ArrayList<KeyStore.Builder> keyStoreBuilders,
+                                            String clientKeystoreType,
+                                            ClientKeyStoreProvider nativeKeyStoreProvider,
+                                            Supplier<String> clientKeystoreFileSupplier,
+                                            ProtectionParameterSupplier protectionParameterSupplier)
+            throws KeyStoreException {
+        if (nativeKeyStoreProvider != null) {
+            keyStoreBuilders.add(nativeKeyStoreProvider.getKeyStoreBuilder());
+            return;
+        }
+
+        if ("PKCS12".equals(clientKeystoreType) || "JKS".equals(clientKeystoreType)) {
+            String clientKeystoreFile = clientKeystoreFileSupplier.get();
+            if (clientKeystoreFile != null && !clientKeystoreFile.isEmpty()) {
+                // Preserve the existing lazy file-keystore and password behavior.
+                keyStoreBuilders.add(KeyStore.Builder.newInstance(clientKeystoreType, null,
+                        new File(clientKeystoreFile), protectionParameterSupplier.get()));
+            }
+        }
+    }
+
+    private KeyStore.ProtectionParameter getClientKeystoreProtectionParameter()
+            throws KeyStoreException {
+        final char[] password;
+        try {
+            password = Settings.getCharArrayProperty("davmail.ssl.clientKeystorePass",
+                    "davmail.ssl.clientKeystorePassFile");
+        } catch (IOException e) {
+            throw new KeyStoreException("Unable to read client keystore password file", e);
+        }
+        if (password == null) {
+            return getProtectionParameter(null);
+        }
+        try {
+            return new KeyStore.PasswordProtection(password);
+        } finally {
+            Arrays.fill(password, '\0');
+        }
+    }
+
+    @FunctionalInterface
+    interface ProtectionParameterSupplier {
+        KeyStore.ProtectionParameter get() throws KeyStoreException;
     }
 
     private KeyStore.ProtectionParameter getProtectionParameter(String password) {

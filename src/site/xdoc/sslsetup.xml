@@ -84,6 +84,26 @@ davmail.ssl.keystorePass=password]]></source>
 davmail.ssl.clientKeystoreType=PKCS12
 davmail.ssl.clientKeystoreFile=client.p12
 davmail.ssl.clientKeystorePass=password]]></source>
+                <p>For a headless service or container, keep the inline password empty and provide a UTF-8 secret file instead:</p>
+                <source><![CDATA[
+davmail.ssl.clientKeystorePass=
+davmail.ssl.clientKeystorePassFile=/run/secrets/client-keystore-password]]></source>
+                <p>The same pattern is available for DavMail's inbound server certificate with
+                    <code>davmail.ssl.keystorePassFile</code> and <code>davmail.ssl.keyPassFile</code>.
+                    An inline password always takes precedence over the corresponding file.</p>
+                <p>On macOS, DavMail can instead use TLS client identities already installed in the current user's
+                    Keychain through the JDK Apple provider. No PKCS12 file or certificate password is used:</p>
+                <source><![CDATA[
+davmail.ssl.clientKeystoreType=KeychainStore
+davmail.ssl.clientKeystoreFile=
+davmail.ssl.clientKeystorePass=
+davmail.ssl.clientCertificateAlias=optional-keychain-alias]]></source>
+                <p>The certificate and matching private key must appear as an identity in the current user's macOS
+                    Keychain. macOS may display its normal authorization prompt when Java first uses the private key.
+                    Leave the alias empty to use DavMail's existing certificate selection dialog when multiple suitable
+                    identities are available. Native Linux certificate-store support is intentionally not included in
+                    this proof of concept; a future NSS/p11-kit backend can plug into the same client-keystore provider
+                    abstraction through PKCS11.</p>
                 <p>For a smartcard, first make sure you PKCS11 module is correctly installed by testing mutual
                     authentication through a browser. Then set the following properties in DavMail:</p>
                 <source><![CDATA[

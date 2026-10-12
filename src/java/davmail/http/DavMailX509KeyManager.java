@@ -49,6 +49,8 @@ public class DavMailX509KeyManager implements X509KeyManager {
 
     // Remember selected alias so we don't continually bug the user
     private String cachedAlias;
+    private final String configuredAlias;
+    private final boolean nativeKeyStore;
 
     /**
      * Build the specialized key manager wrapping the default one
@@ -56,7 +58,24 @@ public class DavMailX509KeyManager implements X509KeyManager {
      * @param keyManager original key manager
      */
     public DavMailX509KeyManager(X509KeyManager keyManager) {
+        this(keyManager, null, false);
+    }
+
+    /**
+     * Build a specialized key manager with an optional stable alias selection.
+     *
+     * @param keyManager original key manager
+     * @param configuredAlias raw keystore alias, or empty for interactive selection
+     */
+    public DavMailX509KeyManager(X509KeyManager keyManager, String configuredAlias) {
+        this(keyManager, configuredAlias, false);
+    }
+
+    DavMailX509KeyManager(X509KeyManager keyManager, String configuredAlias,
+                         boolean nativeKeyStore) {
         this.keyManager = keyManager;
+        this.configuredAlias = configuredAlias == null ? "" : configuredAlias.trim();
+        this.nativeKeyStore = nativeKeyStore;
     }
 
     /**
@@ -83,6 +102,26 @@ public class DavMailX509KeyManager implements X509KeyManager {
             if (keyAliases != null) {
                 aliases.addAll(Arrays.asList(keyAliases));
             }
+        }
+
+        if (!configuredAlias.isEmpty()) {
+            String selectedAlias = null;
+            for (String alias : aliases) {
+                if (matchesConfiguredAlias(alias, configuredAlias)) {
+                    if (selectedAlias != null && !selectedAlias.equals(alias)) {
+                        throw new IllegalStateException(
+                                "Configured client certificate alias is ambiguous: " + configuredAlias);
+                    }
+                    selectedAlias = alias;
+                }
+            }
+            if (selectedAlias == null) {
+                throw new IllegalStateException(
+                        "Configured client certificate alias is not suitable for this TLS server: "
+                                + configuredAlias);
+            }
+            LOGGER.info("Selected configured client certificate alias: " + configuredAlias);
+            return selectedAlias;
         }
 
         // If there are more than one show a dialog and return the selected alias
@@ -154,12 +193,46 @@ public class DavMailX509KeyManager implements X509KeyManager {
 
             // none, return null
         } else {
+            if (nativeKeyStore) {
+                throw new IllegalStateException(
+                        "No macOS Keychain client identity is suitable for this TLS server request");
+            }
             LOGGER.debug("No Private Keys found");
             return null;
         }
     }
 
-    private String chooseClientAlias(String[] aliasesArray, String[] descriptionsArray) {
+    static boolean matchesConfiguredAlias(String keyManagerAlias, String configuredAlias) {
+        if (keyManagerAlias == null || configuredAlias == null) {
+            return false;
+        }
+        if (keyManagerAlias.equals(configuredAlias)
+                || keyManagerAlias.equalsIgnoreCase(configuredAlias)) {
+            return true;
+        }
+        String baseAlias = keyManagerAlias;
+        // NewSunX509 prefixes Builder aliases with numeric builder/entry ids.
+        for (int index = 0; index < 2; index++) {
+            int dotIndex = baseAlias.indexOf('.');
+            if (dotIndex <= 0 || !isNumeric(baseAlias.substring(0, dotIndex))) {
+                break;
+            }
+            baseAlias = baseAlias.substring(dotIndex + 1);
+        }
+        return baseAlias.equals(configuredAlias)
+                || baseAlias.equalsIgnoreCase(configuredAlias);
+    }
+
+    private static boolean isNumeric(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            if (!Character.isDigit(value.charAt(index))) {
+                return false;
+            }
+        }
+        return !value.isEmpty();
+    }
+
+    protected String chooseClientAlias(String[] aliasesArray, String[] descriptionsArray) {
         System.out.println("Choose client alias:");
         int i = 1;
         for (String aliasDescription:descriptionsArray) {
@@ -227,6 +300,22 @@ public class DavMailX509KeyManager implements X509KeyManager {
      * Passthrough to wrapped keymanager
      */
     public PrivateKey getPrivateKey(String string) {
-        return keyManager.getPrivateKey(string);
+        final PrivateKey privateKey;
+        try {
+            privateKey = keyManager.getPrivateKey(string);
+        } catch (RuntimeException e) {
+            if (nativeKeyStore) {
+                throw new IllegalStateException(
+                        "macOS Keychain access denied for client certificate alias: "
+                                + stripAlias(string), e);
+            }
+            throw e;
+        }
+        if (nativeKeyStore && privateKey == null) {
+            throw new IllegalStateException(
+                    "macOS Keychain access denied or private key unavailable for client certificate alias: "
+                            + stripAlias(string));
+        }
+        return privateKey;
     }
 }
