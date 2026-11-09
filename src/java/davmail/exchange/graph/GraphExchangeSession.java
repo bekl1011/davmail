@@ -22,7 +22,9 @@ package davmail.exchange.graph;
 import davmail.BundleMessage;
 import davmail.Settings;
 import davmail.exception.DavMailException;
+import davmail.exception.HttpBadRequestException;
 import davmail.exception.HttpForbiddenException;
+import davmail.exception.HttpMethodNotAllowedException;
 import davmail.exception.HttpNotFoundException;
 import davmail.exception.HttpPreconditionFailedException;
 import davmail.exception.HttpServerErrorException;
@@ -52,6 +54,8 @@ import org.apache.http.client.methods.HttpRequestBase;
 import org.codehaus.jettison.json.JSONArray;
 import org.codehaus.jettison.json.JSONException;
 import org.codehaus.jettison.json.JSONObject;
+import org.htmlcleaner.BaseToken;
+import org.htmlcleaner.ContentNode;
 import org.htmlcleaner.HtmlCleaner;
 import org.htmlcleaner.TagNode;
 
@@ -89,6 +93,7 @@ import java.util.Map;
 import java.util.MissingResourceException;
 import java.util.NoSuchElementException;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -303,7 +308,7 @@ public class GraphExchangeSession extends ExchangeSession {
                     // experimental recurrence support
                     JSONObject recurrence = graphObject.optJSONObject("recurrence");
                     if (recurrence != null) {
-                        vTodo.setPropertyValue("RRULE", convertRecurrenceToRrule(recurrence));
+                        vTodo.setPropertyValue("RRULE", convertRecurrenceToRrule(recurrence, null));
                     }
 
                     localVCalendar.addVObject(vTodo);
@@ -383,17 +388,26 @@ public class GraphExchangeSession extends ExchangeSession {
             vEvent.addProperty(convertBodyToVproperty(jsonEvent));
 
             vEvent.setPropertyValue("LAST-MODIFIED", jsonEvent.optString("lastModifiedDateTime"));
-            vEvent.setPropertyValue("DTSTAMP", jsonEvent.optString("lastModifiedDateTime"));
+            // DTSTAMP is PidLidOwnerCriticalChange per MS-OXCICAL, fall back to lastModifiedDateTime
+            String dtstamp = jsonEvent.optString("dtstamp");
+            if (dtstamp == null) {
+                dtstamp = jsonEvent.optString("lastModifiedDateTime");
+            }
+            vEvent.setPropertyValue("DTSTAMP", dtstamp);
 
             // retrieve original start timezone to restore original timezone on recurring events across DST
             String originalStartTimeZone = jsonEvent.optString("originalStartTimeZone");
             vEvent.addProperty(convertDateTimeTimeZoneToVproperty("DTSTART", jsonEvent.optJSONObject("start"), DateUtil.getExchangeTimeZone(originalStartTimeZone)));
             vEvent.addProperty(convertDateTimeTimeZoneToVproperty("DTEND", jsonEvent.optJSONObject("end"), DateUtil.getExchangeTimeZone(originalStartTimeZone)));
 
-            vEvent.setPropertyValue("LOCATION", jsonEvent.optString("location", "displayName"));
+            vEvent.setPropertyValue("LOCATION", jsonEvent.optSectionString("location", "displayName"));
             vEvent.setPropertyValue("CATEGORIES", jsonEvent.optString("categories"));
 
-            vEvent.setPropertyValue("CLASS", convertClassFromExchange(jsonEvent.optString("sensitivity")));
+            vEvent.setPropertyValue("CLASS", convertClassFromExchange(jsonEvent.optString("class")));
+
+            if (jsonEvent.optBoolean("isCancelled")) {
+                vEvent.setPropertyValue("STATUS", "CANCELLED");
+            }
 
             // custom microsoft properties
             String showAs = jsonEvent.optString("showAs");
@@ -406,7 +420,7 @@ public class GraphExchangeSession extends ExchangeSession {
             }
             String responseRequested = jsonEvent.optString("responseRequested");
             if (responseRequested != null) {
-                vEvent.setPropertyValue("X-MICROSOFT-CDO-ISRESPONSEREQUESTED", responseRequested.toUpperCase());
+                vEvent.setPropertyValue("X-MICROSOFT-ISRESPONSEREQUESTED", responseRequested.toUpperCase());
             }
 
             if (jsonEvent.optBoolean("isReminderOn")) {
@@ -426,7 +440,7 @@ public class GraphExchangeSession extends ExchangeSession {
 
             vEvent.setPropertyValue("X-MICROSOFT-DISALLOW-COUNTER", jsonEvent.optBoolean("allowNewTimeProposals") ? "FALSE" : "TRUE");
 
-            String joinUrl = jsonEvent.optString("onlineMeeting", "joinUrl");
+            String joinUrl = jsonEvent.optSectionString("onlineMeeting", "joinUrl");
             if (joinUrl != null) {
                 vEvent.setPropertyValue("X-MICROSOFT-SKYPETEAMSMEETINGURL", joinUrl);
             }
@@ -439,11 +453,12 @@ public class GraphExchangeSession extends ExchangeSession {
         private void handleRecurrence(VCalendar localVCalendar, GraphObject graphObject) throws JSONException, DavMailException {
             JSONObject recurrence = graphObject.optJSONObject("recurrence");
             if (recurrence != null) {
-                localVCalendar.addFirstVeventProperty(new VProperty("RRULE", convertRecurrenceToRrule(recurrence)));
+                VProperty dtStart = localVCalendar.getFirstVevent().getProperty("DTSTART");
+                localVCalendar.addFirstVeventProperty(new VProperty("RRULE", convertRecurrenceToRrule(recurrence, dtStart)));
             }
         }
 
-        private String convertRecurrenceToRrule(JSONObject recurrence) throws JSONException, DavMailException {
+        private String convertRecurrenceToRrule(JSONObject recurrence, VProperty dtStart) throws JSONException, DavMailException {
             StringBuilder rruleValue = new StringBuilder();
             JSONObject pattern = recurrence.getJSONObject("pattern");
             JSONObject range = recurrence.getJSONObject("range");
@@ -487,7 +502,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 rruleValue.append(patternType.toUpperCase());
             }
             if (rangeType.equals("endDate")) {
-                String endDate = buildUntilDate(range.getString("endDate"), graphObject.optJSONObject("start"));
+                String endDate = buildUntilDate(range.getString("endDate"), dtStart);
                 rruleValue.append(";UNTIL=").append(endDate);
             } else if (rangeType.equals("numbered")) {
                 int numberOfOccurrences = range.getInt("numberOfOccurrences");
@@ -521,15 +536,24 @@ public class GraphExchangeSession extends ExchangeSession {
             return rruleValue.toString();
         }
 
-        private String buildUntilDate(String date, JSONObject startDate) throws DavMailException {
+        /**
+         * Build RRULE UNTIL value from graph recurrence range end date.
+         * Graph end date has no time part, use the local start time in the event timezone.
+         * @param date recurrence range end date (yyyy-MM-dd)
+         * @param dtStart event DTSTART property with TZID param (series timezone), null for tasks
+         * @return UNTIL value in UTC, or date only for tasks
+         * @throws DavMailException on error
+         */
+        private String buildUntilDate(String date, VProperty dtStart) throws DavMailException {
             String result = null;
-            if (date != null && date.length() == 10) {
-                String startDateTimeZone = startDate.optString("timeZone");
-                String startDateDateTime = startDate.optString("dateTime");
-                // graph provided until date does not have time part, get value from startDate
-                String untilDateTime = date + startDateDateTime.substring(10);
-
-                result = DateUtil.convertDate(untilDateTime, "yyyy-MM-dd'T'HH:mm:ss", DateUtil.getTimeZone(startDateTimeZone),
+            if (date != null && date.length() == 10 && dtStart == null) {
+                // task: date only UNTIL
+                result = DateUtil.convertDate(date, "yyyy-MM-dd", DateUtil.UTC, "yyyyMMdd", DateUtil.UTC);
+            } else if (date != null && date.length() == 10) {
+                // Use DTSTART value (already converted to series timezone) to get local time and TZID
+                // Combine graph end date (yyyy-MM-dd) with DTSTART local time (THHmmss) and convert to UTC
+                String untilDateTime = date + dtStart.getValue().substring(8);
+                result = DateUtil.convertDate(untilDateTime, "yyyy-MM-dd'T'HHmmss", DateUtil.getTimeZone(dtStart.getParamValue("TZID")),
                         "yyyyMMdd'T'HHmmss'Z'", DateUtil.UTC);
             }
             return result;
@@ -722,7 +746,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 } else if (folderId.isTask()) {
                     graphResponse = createOrUpdateTask(currentItemId);
                 } else if (isExistingEvent && isMeeting && !isOrganizer) {
-                    graphResponse = updateReminder(currentItemId);
+                    graphResponse = updateMeetingAsAttendee(currentItemId);
                 } else {
 
                     GraphObject newGraphEvent = buildJsonEvent(vEvent);
@@ -772,15 +796,8 @@ public class GraphExchangeSession extends ExchangeSession {
                     newGraphEvent.put("isAllDay", vCalendar.isCdoAllDay());
 
                     // showAs: free, tentative, busy, oof, workingElsewhere, unknown
-                    String status = vCalendar.getFirstVeventPropertyValue("STATUS");
-                    if ("TENTATIVE".equals(status)) {
-                        // this is a tentative event
-                        newGraphEvent.put("showAs", "tentative");
-                    } else {
-                        // otherwise, we use the same value as before, as received from the server
-                        // however, the case matters, so we still have to transform it "BUSY" -> "Busy"
-                        newGraphEvent.put("showAs", "BUSY".equals(vCalendar.getFirstVeventPropertyValue("X-MICROSOFT-CDO-BUSYSTATUS")) ? "busy" : "free");
-                    }
+                    String showAs = getShowAs();
+                    newGraphEvent.put("showAs", showAs != null ? showAs : "free");
 
                     if (isExistingEvent) {
                         graphRequestBuilder.setMethod(HttpPatch.METHOD_NAME)
@@ -835,7 +852,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 itemResult.etag = graphResponse.optString("changeKey");
 
                 // id is empty on meeting response
-                if (graphResponse.optString("id", null) != null) {
+                if (graphResponse.optString("id") != null) {
                     // workaround for Thunderbird, keep a cache of itemName to id map
                     urlcompnameToIdMap.put(convertItemNameToEML(itemName), graphResponse.optString("id"));
                 }
@@ -878,24 +895,51 @@ public class GraphExchangeSession extends ExchangeSession {
                             LOGGER.debug("Attendee status unchanged " + currentAttendeeStatus + " on instance " + instanceId);
                         }
                     } else {
-                        throw new IOException("Unable to find occurrence for id " + instanceId);
+                        LOGGER.debug("Client sent instanceId " + instanceId + " with attendee status " + attendeeStatus + " not found");
                     }
                 }
             }
             return responseStatusUpdates;
         }
 
-        private GraphObject updateReminder(String currentItemId) throws JSONException, IOException {
-            LOGGER.debug("Update on existing meeting, not organizer, not a meeting response or dismiss: allow reminder updates only");
+        /**
+         * Get Graph showAs value from the current calendar event.
+         *
+         * @return showAs value or null if the client did not provide a usable value
+         */
+        private String getShowAs() {
+            return convertShowAs(vCalendar.getFirstVeventPropertyValue("STATUS"),
+                    vCalendar.getFirstVeventPropertyValue("X-MICROSOFT-CDO-BUSYSTATUS"));
+        }
 
-            // handle reminder configuration
+        /**
+         * Update meeting as attendee.
+         * Attendees can only update reminder and showAs information, everything else is ignored.
+         * showAs is only updated if the client provided a usable value.
+         *
+         * @param currentItemId target item id
+         * @return graph response
+         * @throws JSONException on error
+         * @throws IOException on error
+         */
+        private GraphObject updateMeetingAsAttendee(String currentItemId) throws JSONException, IOException {
+            LOGGER.debug("Update on existing meeting, not organizer, not a meeting response or dismiss: allow reminder and showAs updates");
+
+            GraphObject attendeeUpdates = new GraphObject()
+                    .put("isReminderOn", vCalendar.hasVAlarm())
+                    .put("reminderMinutesBeforeStart", vCalendar.getReminderMinutesBeforeStart());
+
+            // do not touch showAs if client does not provide it, e.g. a reminder only change
+            String showAs = getShowAs();
+            if (showAs != null) {
+                attendeeUpdates.put("showAs", showAs);
+            }
+
             GraphRequestBuilder graphRequestBuilder = new GraphRequestBuilder().setMethod(HttpPatch.METHOD_NAME)
                     .setMailbox(folderId.mailbox)
                     .setObjectType("events")
                     .setObjectId(currentItemId)
-                    .setJsonBody(new GraphObject().put("isReminderOn", vCalendar.hasVAlarm())
-                            .put("reminderMinutesBeforeStart", vCalendar.getReminderMinutesBeforeStart())
-                    );
+                    .setJsonBody(attendeeUpdates);
             return executeGraphRequest(graphRequestBuilder);
         }
 
@@ -1049,26 +1093,29 @@ public class GraphExchangeSession extends ExchangeSession {
                     pattern.put("type", "weekly").put("daysOfWeek", byDay != null ? convertByDayToArray(byDay) : new JSONArray().put(DateUtil.getDayOfWeek(startDate)));
                     // firstDayOfWeek is required for weekly patterns in Graph
                     pattern.put("firstDayOfWeek", wkst != null ? convertCaldavDayToGraph(wkst) : "monday");
-                } else if ("MONTHLY".equals(frequency)) {
-                    if (byDay != null) {
-                        pattern.put("type", "relativeMonthly");
-                        setRelativePattern(pattern, byDay);
-                    } else {
-                        pattern.put("type", "absoluteMonthly");
-                        pattern.put("dayOfMonth", byMonthDay != null ? Integer.parseInt(byMonthDay) : Integer.parseInt(startDate.substring(8, 10)));
-                    }
-                } else if ("YEARLY".equals(frequency)) {
-                    if (byDay != null) {
-                        pattern.put("type", "relativeYearly");
-                        setRelativePattern(pattern, byDay);
-                    } else {
-                        pattern.put("type", "absoluteYearly")
-                                .put("dayOfMonth", byMonthDay != null ? Integer.parseInt(byMonthDay) : Integer.parseInt(startDate.substring(8, 10)));
-                    }
-                    if (byMonth != null) {
-                        pattern.put("month", Integer.parseInt(byMonth));
-                    } else {
-                        pattern.put("month", Integer.parseInt(startDate.substring(5, 7)));
+                } else {
+                    int dayOfMonth = byMonthDay != null ? Integer.parseInt(byMonthDay) : Integer.parseInt(startDate.substring(8, 10));
+                    if ("MONTHLY".equals(frequency)) {
+                        if (byDay != null) {
+                            pattern.put("type", "relativeMonthly");
+                            setRelativePattern(pattern, byDay);
+                        } else {
+                            pattern.put("type", "absoluteMonthly");
+                            pattern.put("dayOfMonth", dayOfMonth);
+                        }
+                    } else if ("YEARLY".equals(frequency)) {
+                        if (byDay != null) {
+                            pattern.put("type", "relativeYearly");
+                            setRelativePattern(pattern, byDay);
+                        } else {
+                            pattern.put("type", "absoluteYearly")
+                                    .put("dayOfMonth", dayOfMonth);
+                        }
+                        if (byMonth != null) {
+                            pattern.put("month", Integer.parseInt(byMonth));
+                        } else {
+                            pattern.put("month", Integer.parseInt(startDate.substring(5, 7)));
+                        }
                     }
                 }
 
@@ -1122,8 +1169,6 @@ public class GraphExchangeSession extends ExchangeSession {
 
         private String convertIndex(int index) {
             switch (index) {
-                case 1:
-                    return "first";
                 case 2:
                     return "second";
                 case 3:
@@ -1132,7 +1177,7 @@ public class GraphExchangeSession extends ExchangeSession {
                     return "fourth";
                 case -1:
                     return "last";
-                default:
+                default: // and 1
                     return "first";
             }
         }
@@ -1284,6 +1329,8 @@ public class GraphExchangeSession extends ExchangeSession {
             String location = vEvent.getPropertyValue("LOCATION");
             newGraphEvent.put("location", new JSONObject().put("displayName", location));
 
+            newGraphEvent.put("class", convertClassToExchange(vEvent.getPropertyValue("CLASS")));
+
             newGraphEvent.setCategories(vEvent.getPropertyValue("CATEGORIES"));
             // Collect categories on multiple lines
             List<VProperty> categories = vEvent.getProperties("CATEGORIES");
@@ -1422,8 +1469,11 @@ public class GraphExchangeSession extends ExchangeSession {
     }
 
     /**
-     * Override isExpired check.
-     * @return false, token is automatically refreshed over Graph
+     * Override isExpired check with a lightweight Graph request.
+     * The session is expired if the http client is closed or the token check fails,
+     * network level errors are rethrown to avoid reauthentication.
+     *
+     * @return true if the session expired
      * @throws IOException on network error
      */
     @Override
@@ -1449,14 +1499,55 @@ public class GraphExchangeSession extends ExchangeSession {
         executeJsonRequest(new GraphRequestBuilder().setMethod(HttpGet.METHOD_NAME).setObjectType("mailFolders").setSelect("id"));
     }
 
-    private String convertHtmlToText(String htmlText) {
+    /**
+     * Convert iCalendar STATUS and X-MICROSOFT-CDO-BUSYSTATUS to Graph showAs.
+     * Graph showAs values: free, tentative, busy, oof, workingElsewhere, unknown (case sensitive).
+     *
+     * @param status     iCalendar STATUS value, may be null
+     * @param busyStatus X-MICROSOFT-CDO-BUSYSTATUS value, may be null
+     * @return Graph showAs value or null if no usable value is provided
+     */
+    protected static String convertShowAs(String status, String busyStatus) {
+        if ("TENTATIVE".equals(status)) {
+            return "tentative";
+        }
+        if (busyStatus == null) {
+            return null;
+        }
+        switch (busyStatus.toUpperCase()) {
+            case "BUSY":
+                return "busy";
+            case "FREE":
+                return "free";
+            case "TENTATIVE":
+                return "tentative";
+            case "OOF":
+                return "oof";
+            case "WORKINGELSEWHERE":
+                return "workingElsewhere";
+            default:
+                return null;
+        }
+    }
+
+    protected static String convertHtmlToText(String htmlText) {
         StringBuilder builder = new StringBuilder();
 
         HtmlCleaner cleaner = new HtmlCleaner();
         cleaner.getProperties().setDeserializeEntities(true);
         try {
             TagNode node = cleaner.clean(new StringReader(htmlText));
-            for (TagNode childNode : node.getAllElementsList(true)) {
+            convertNodeToText(node, builder);
+        } catch (IOException e) {
+            LOGGER.error("Error converting html to text", e);
+        }
+        return builder.toString();
+    }
+
+    private static void convertNodeToText(TagNode node, StringBuilder builder) {
+        for (BaseToken child : node.getAllChildren()) {
+            if (child instanceof TagNode) {
+                TagNode childNode = (TagNode) child;
                 if ("a".equals(childNode.getName())) {
                     String href = childNode.getAttributeByName("href");
                     String text = childNode.getText().toString().trim();
@@ -1465,12 +1556,12 @@ public class GraphExchangeSession extends ExchangeSession {
                         continue;
                     }
                 }
-                builder.append(childNode.getText());
+                // recurse into child elements
+                convertNodeToText(childNode, builder);
+            } else if (child instanceof ContentNode) {
+                builder.append(((ContentNode) child).getContent());
             }
-        } catch (IOException e) {
-            LOGGER.error("Error converting html to text", e);
         }
-        return builder.toString();
     }
 
     private VProperty convertBodyToVproperty(GraphObject graphObject) {
@@ -1532,6 +1623,21 @@ public class GraphExchangeSession extends ExchangeSession {
         VProperty attendeeProperty = new VProperty(propertyName, "mailto:" + jsonEmailAddress.optString("address"));
         attendeeProperty.addParam("CN", jsonEmailAddress.optString("name"));
         return attendeeProperty;
+    }
+
+    /**
+     * Convert iCalendar CLASS value to Graph sensitivity value.
+     * @param eventClass iCalendar CLASS (PUBLIC, PRIVATE, CONFIDENTIAL)
+     * @return Graph sensitivity value (normal, private, confidential)
+     */
+    protected String convertClassToExchange(String eventClass) {
+        if ("PRIVATE".equals(eventClass)) {
+            return "private";
+        } else if ("CONFIDENTIAL".equals(eventClass)) {
+            return "confidential";
+        } else {
+            return "normal";
+        }
     }
 
     private String convertDateTimeTimeZoneToTaskDate(Date exchangeDateValue) {
@@ -1864,18 +1970,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 }
 
                 // compute desired members from mailto: URIs
-                Set<String> desiredMembers = new LinkedHashSet<>();
-                if (distributionListMembers != null) {
-                    for (String member : distributionListMembers) {
-                        String email = member;
-                        if (email.startsWith("mailto:")) {
-                            email = email.substring(7);
-                        }
-                        if (!email.isEmpty()) {
-                            desiredMembers.add(email);
-                        }
-                    }
-                }
+                Set<String> desiredMembers = getDesiredMembers();
 
                 // remove members no longer in the list
                 Set<String> membersToRemove = new HashSet<>(existingMembers);
@@ -1932,6 +2027,22 @@ public class GraphExchangeSession extends ExchangeSession {
                 throw new IOException(e);
             }
             return itemResult;
+        }
+
+        public Set<String> getDesiredMembers() {
+            Set<String> desiredMembers = new LinkedHashSet<>();
+            if (distributionListMembers != null) {
+                for (String member : distributionListMembers) {
+                    String email = member;
+                    if (email.startsWith("mailto:")) {
+                        email = email.substring(7);
+                    }
+                    if (!email.isEmpty()) {
+                        desiredMembers.add(email);
+                    }
+                }
+            }
+            return desiredMembers;
         }
 
         private void updatePhoto(FolderId folderId, String contactId) throws IOException {
@@ -2024,6 +2135,7 @@ public class GraphExchangeSession extends ExchangeSession {
         wellKnownFolderMap.put(WellKnownFolderName.junkemail.name(), ExchangeSession.JUNK);
         wellKnownFolderMap.put(WellKnownFolderName.sentitems.name(), ExchangeSession.SENT);
         wellKnownFolderMap.put(WellKnownFolderName.deleteditems.name(), ExchangeSession.TRASH);
+        wellKnownFolderMap.put(WellKnownFolderName.outbox.name(), ExchangeSession.UNSENT);
     }
 
     protected static final HashSet<GraphField> IMAP_MESSAGE_ATTRIBUTES = new HashSet<>();
@@ -2164,6 +2276,7 @@ public class GraphExchangeSession extends ExchangeSession {
         EVENT_ATTRIBUTES.add(GraphField.get("categories"));
         EVENT_ATTRIBUTES.add(GraphField.get("changeKey"));
         EVENT_ATTRIBUTES.add(GraphField.get("createdDateTime"));
+        EVENT_ATTRIBUTES.add(GraphField.get("dtstamp"));
         EVENT_ATTRIBUTES.add(GraphField.get("end"));
         EVENT_ATTRIBUTES.add(GraphField.get("exceptionOccurrences"));
         EVENT_ATTRIBUTES.add(GraphField.get("hasAttachments"));
@@ -2173,6 +2286,7 @@ public class GraphExchangeSession extends ExchangeSession {
         EVENT_ATTRIBUTES.add(GraphField.get("id"));
         EVENT_ATTRIBUTES.add(GraphField.get("importance"));
         EVENT_ATTRIBUTES.add(GraphField.get("isAllDay"));
+        EVENT_ATTRIBUTES.add(GraphField.get("isCancelled"));
         EVENT_ATTRIBUTES.add(GraphField.get("isOnlineMeeting"));
         EVENT_ATTRIBUTES.add(GraphField.get("onlineMeeting"));
         EVENT_ATTRIBUTES.add(GraphField.get("isOrganizer"));
@@ -2187,7 +2301,7 @@ public class GraphExchangeSession extends ExchangeSession {
         EVENT_ATTRIBUTES.add(GraphField.get("reminderMinutesBeforeStart"));
         EVENT_ATTRIBUTES.add(GraphField.get("responseRequested"));
         EVENT_ATTRIBUTES.add(GraphField.get("responseStatus"));
-        EVENT_ATTRIBUTES.add(GraphField.get("sensitivity"));
+        EVENT_ATTRIBUTES.add(GraphField.get("class"));
         EVENT_ATTRIBUTES.add(GraphField.get("showAs"));
         EVENT_ATTRIBUTES.add(GraphField.get("start"));
         EVENT_ATTRIBUTES.add(GraphField.get("subject"));
@@ -2372,29 +2486,52 @@ public class GraphExchangeSession extends ExchangeSession {
                 // save draft message id
                 draftMessageId = graphResponse.getString("id");
 
-                // unset draft flag on returned draft message properties
-                graphResponse.put("messageFlags", "4");
-                // read flag travels in the draft property (1 = read, see ImapConnection)
-                graphResponse.put("read", properties != null && "1".equals(properties.get("draft")));
-                applyMessageProperties(graphResponse, properties);
-                // the recreated message would otherwise carry the upload time and no
-                // Received: headers: Graph ignores receivedDateTime, sentDateTime and
-                // internetMessageHeaders on creation, but honours the MAPI properties
-                preserveMimeOrigin(graphResponse, mimeMessage, properties);
+                // try to recreate as non-draft in the target folder
+                try {
+                    // unset draft flag on returned draft message properties
+                    graphResponse.put("messageFlags", "4");
+                    // read flag travels in the draft property (1 = read, see ImapConnection)
+                    graphResponse.put("read", properties != null && "1".equals(properties.get("draft")));
+                    applyMessageProperties(graphResponse, properties);
+                    // the recreated message would otherwise carry the upload time and no
+                    // Received: headers: Graph ignores receivedDateTime, sentDateTime and
+                    // internetMessageHeaders on creation, but honours the MAPI properties
+                    preserveMimeOrigin(graphResponse, mimeMessage, properties);
 
-                // now use this to recreate message in the right folder
-                graphResponse = executeGraphRequest(new GraphRequestBuilder()
-                        .setMethod(HttpPost.METHOD_NAME)
-                        .setMailbox(folderId.mailbox)
-                        .setObjectType("mailFolders")
-                        .setObjectId(folderId.id)
-                        .setJsonBody(graphResponse.jsonObject)
-                        .setChildType("messages"));
+                    // now use this to recreate message in the right folder
+                    graphResponse = executeGraphRequest(new GraphRequestBuilder()
+                            .setMethod(HttpPost.METHOD_NAME)
+                            .setMailbox(folderId.mailbox)
+                            .setObjectType("mailFolders")
+                            .setObjectId(folderId.id)
+                            .setJsonBody(graphResponse.jsonObject)
+                            .setChildType("messages"));
+                } catch (HttpBadRequestException | HttpMethodNotAllowedException e) {
+                    // re-creation to clear draft flag failed (e.g. embedded messages, complex content types)
+                    // try Fast Transfer Stream export/import workaround, additional MailboxItem.ImportExport and User.Read.All scoper required
+                    try {
+                        LOGGER.warn("JSON message re-creation failed, trying Fast Transfer Stream import workaround");
+                        graphResponse = importMessageViaFastTransferStream(draftMessageId, folderId);
+                    } catch (HttpForbiddenException ftsException) {
+                        // Fast Transfer Stream import also failed, fall back to moving the draft as-is
+                        LOGGER.warn("Fast Transfer Stream import workaround failed, need the MailboxItem.ImportExport and User.Read.All scopes, moving draft instead");
+                        applyMessageProperties(graphResponse, properties);
+                        graphResponse = executeGraphRequest(new GraphRequestBuilder()
+                                .setMethod(HttpPost.METHOD_NAME)
+                                .setMailbox(folderId.mailbox)
+                                .setObjectType("messages")
+                                .setObjectId(draftMessageId)
+                                .setChildType("move")
+                                .setJsonBody(new JSONObject().put("destinationId", folderId.id)));
+                        // draft was moved, don't delete it
+                        draftMessageId = null;
+                    }
+                }
 
             } catch (JSONException e) {
                 throw new IOException(e);
             } finally {
-                // delete draft message
+                // delete draft message (only if re-creation succeeded)
                 if (draftMessageId != null) {
                     executeJsonRequest(new GraphRequestBuilder()
                             .setMethod(HttpDelete.METHOD_NAME)
@@ -2404,12 +2541,8 @@ public class GraphExchangeSession extends ExchangeSession {
             }
 
         }
-        return buildMessage(executeJsonRequest(new GraphRequestBuilder()
-                .setMethod(HttpGet.METHOD_NAME)
-                .setObjectType("messages")
-                .setMailbox(folderId.mailbox)
-                .setObjectId(graphResponse.optString("id"))
-                .setSelectFields(IMAP_MESSAGE_ATTRIBUTES)));
+
+        return getMessage(folderId, graphResponse.optString("id"));
     }
 
     /**
@@ -2470,6 +2603,115 @@ public class GraphExchangeSession extends ExchangeSession {
     }
 
     /**
+     * Import a draft message into a target folder as a non-draft using the Fast Transfer Stream export/import workaround.
+     * Requires MailboxItem.ImportExport and User.Read.All scopes.
+     *
+     * @param draftMessageId the id of the draft message to import
+     * @param folderId the target folder id
+     * @return the imported message as a GraphObject
+     * @throws IOException on error
+     * @see <a href="https://learn.microsoft.com/en-us/graph/mailbox-import-export-concept-overview">Mailbox import/export overview</a>
+     * @see <a href="https://glenscales.substack.com/p/work-around-for-importing-mime-messages">Work around for importing MIME messages</a>
+     */
+    private GraphObject importMessageViaFastTransferStream(String draftMessageId, FolderId folderId) throws IOException {
+        try {
+            // Get primary mailbox id from exchange settings (requires User.Read.All)
+            JSONObject exchangeSettings = executeJsonRequest(new GraphRequestBuilder()
+                    .setMethod(HttpGet.METHOD_NAME)
+                    .setMailbox(folderId.mailbox)
+                    .setObjectType("settings/exchange"));
+            String primaryMailboxId = exchangeSettings.getString("primaryMailboxId");
+
+            // Export message via Fast Transfer Stream
+            JSONObject exportResult = executeJsonRequest(new GraphRequestBuilder()
+                    .setMethod(HttpPost.METHOD_NAME)
+                    .setObjectType("mailboxes").setObjectId(primaryMailboxId).setChildType("exportItems")
+                    .setJsonBody(new JSONObject().put("itemIds", new JSONArray().put(draftMessageId))));
+            String base64Fts = exportResult.getJSONArray("value").getJSONObject(0).getString("data");
+            byte[] ftsData = IOUtil.decodeBase64(base64Fts);
+
+            // Patch PidTagMessageFlags in the FTS stream
+            // PidTagMessageFlags property tag: PT_LONG (0x0003) + PropId 0x0E07 => bytes 03 00 07 0E
+            patchMessageFlags(ftsData);
+
+            // Create import session
+            JSONObject importSession = executeJsonRequest(new GraphRequestBuilder()
+                    .setMethod(HttpPost.METHOD_NAME)
+                    .setObjectType("mailboxes").setObjectId(primaryMailboxId).setChildType("createImportSession"));
+            String importUrl = importSession.getString("importUrl");
+
+            // Upload modified FTS to target folder
+            JSONObject uploadRequest = new JSONObject()
+                    .put("FolderId", folderId.id)
+                    .put("Mode", "create")
+                    .put("Data", IOUtil.encodeBase64AsString(ftsData));
+            JSONObject uploadResult = executeJsonRequest(new GraphRequestBuilder()
+                    .setMethod(HttpPost.METHOD_NAME)
+                    .setUrl(importUrl)
+                    .setSkipAuthorization()
+                    .setJsonBody(uploadRequest));
+
+            // map itemId from import response to id for the calling code
+            return new GraphObject().put("id", uploadResult.getString("itemId"));
+        } catch (JSONException e) {
+            throw new IOException("FTS import failed: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Find and patch PidTagMessageFlags (0x0E07) in an FTS byte stream.
+     * Clears the MSGFLAG_UNSENT (0x0008) bit and sets MSGFLAG_SUBMIT (0x0004) bit
+     * to make the message appear as a sent/non-draft message.
+     *
+     * @param data the FTS byte array to patch in-place
+     */
+    static void patchMessageFlags(byte[] data) {
+        // PidTagMessageFlags property tag in little-endian: PT_LONG=0x0003, PropId=0x0E07 => bytes: 03 00 07 0E
+        byte[] pattern = {0x03, 0x00, 0x07, 0x0E};
+        int tagIndex = findPattern(data, pattern);
+        if (tagIndex >= 0) {
+            int valueOffset = tagIndex + 4; // PT_LONG value follows the 4-byte tag
+            if (valueOffset + 4 <= data.length) {
+                int oldFlags = (data[valueOffset] & 0xFF)
+                        | ((data[valueOffset + 1] & 0xFF) << 8)
+                        | ((data[valueOffset + 2] & 0xFF) << 16)
+                        | ((data[valueOffset + 3] & 0xFF) << 24);
+                int newFlags = (oldFlags & ~0x0008) | 0x0004; // clear UNSENT, set SUBMIT
+                data[valueOffset] = (byte) (newFlags & 0xFF);
+                data[valueOffset + 1] = (byte) ((newFlags >> 8) & 0xFF);
+                data[valueOffset + 2] = (byte) ((newFlags >> 16) & 0xFF);
+                data[valueOffset + 3] = (byte) ((newFlags >> 24) & 0xFF);
+                LOGGER.debug("Patched PidTagMessageFlags: 0x" + Integer.toHexString(oldFlags) +
+                        " -> 0x" + Integer.toHexString(newFlags));
+            }
+        } else {
+            LOGGER.warn("PidTagMessageFlags not found in FTS stream");
+        }
+    }
+
+    /**
+     * Find pattern in byte array
+     * @param data byte array
+     * @param pattern pattern to find
+     * @return pattern offset or -1 if not found
+     */
+    private static int findPattern(byte[] data, byte[] pattern) {
+        for (int i = 0; i <= data.length - pattern.length; i++) {
+            boolean match = true;
+            for (int j = 0; j < pattern.length; j++) {
+                if (data[i + j] != pattern[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * Get message header value from MIME message.
      * Warn on error, do not throw exception.
      * @param mimeMessage MIME message
@@ -2487,7 +2729,7 @@ public class GraphExchangeSession extends ExchangeSession {
     }
 
     protected Message getMessage(FolderId folderId, String messageId) throws IOException {
-        return buildMessage(executeJsonRequest(new GraphRequestBuilder()
+        return buildMessage(folderId, executeJsonRequest(new GraphRequestBuilder()
                 .setMethod(HttpGet.METHOD_NAME)
                 .setObjectType("messages")
                 .setMailbox(folderId.mailbox)
@@ -2572,7 +2814,7 @@ public class GraphExchangeSession extends ExchangeSession {
         }
     }
 
-    private Message buildMessage(JSONObject response) {
+    private Message buildMessage(FolderId folderId, JSONObject response) {
         Message message = new Message();
         GraphObject graphResponse = new GraphObject(response);
 
@@ -2661,8 +2903,8 @@ public class GraphExchangeSession extends ExchangeSession {
             LOGGER.debug(buffer.toString());
         }
 
+        message.folderId = folderId;
         return message;
-
     }
 
     /**
@@ -2745,11 +2987,22 @@ public class GraphExchangeSession extends ExchangeSession {
 
     @Override
     public void deleteMessage(ExchangeSession.Message message) throws IOException {
-        executeJsonRequest(new GraphRequestBuilder()
-                .setMethod(HttpDelete.METHOD_NAME)
-                .setMailbox(((Message) message).folderId.mailbox)
-                .setObjectType("messages")
-                .setObjectId(((Message) message).id));
+        try {
+            executeJsonRequest(new GraphRequestBuilder()
+                    .setMethod(HttpDelete.METHOD_NAME)
+                    .setMailbox(((Message) message).folderId.mailbox)
+                    .setObjectType("messages")
+                    .setObjectId(((Message) message).id));
+        } catch (HttpNotFoundException e) {
+            LOGGER.debug("Ignore already deleted message " + message.getImapUid());
+        } catch (HttpForbiddenException e) {
+            // workaround for Graph bug using immutableid
+            if (e.getMessage() != null && "ErrorCannotDeleteObject".equals(e.getCode())) {
+                LOGGER.warn("Ignore already deleted message " + message.getImapUid() + " (ErrorCannotDeleteObject)");
+            } else {
+                throw e;
+            }
+        }
     }
 
     @Override
@@ -2777,7 +3030,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 public int read(byte[] buffer, int offset, int length) throws IOException {
                     int count = super.read(buffer, offset, length);
                     totalCount += count;
-                    if (totalCount - lastLogCount > 1024 * 128) {
+                    if (totalCount - lastLogCount > 1024 * 1024) {
                         DavGatewayTray.debug(new BundleMessage("LOG_DOWNLOAD_PROGRESS", String.valueOf(totalCount / 1024), message.getPermanentId()));
                         DavGatewayTray.switchIcon();
                         lastLogCount = totalCount;
@@ -2827,10 +3080,7 @@ public class GraphExchangeSession extends ExchangeSession {
         GraphIterator graphIterator = executeSearchRequest(httpRequestBuilder);
 
         while (graphIterator.hasNext() && messageList.size() < maxCount) {
-            Message message = buildMessage(graphIterator.next());
-            message.messageList = messageList;
-            message.folderId = folderId;
-            messageList.add(message);
+            messageList.add(buildMessage(folderId, graphIterator.next()));
         }
         Collections.sort(messageList);
         return messageList;
@@ -2840,10 +3090,6 @@ public class GraphExchangeSession extends ExchangeSession {
 
         protected AttributeCondition(String attributeName, Operator operator, String value) {
             super(attributeName, operator, value);
-        }
-
-        protected Operator getOperator() {
-            return operator;
         }
 
         protected GraphField getField() {
@@ -2903,8 +3149,9 @@ public class GraphExchangeSession extends ExchangeSession {
                     buffer.append("singleValueExtendedProperties/Any(ep: ep/id eq '").append(graphId)
                             .append("' and cast(ep/value,Edm.Binary) ").append(convertOperator(operator)).append(" binary'").append(StringUtil.escapeQuotes(value)).append("')");
                 } else if (field.isDate()) {
+                    // OData v4 literal: graph rejects the v3 datetimeoffset'...' syntax
                     buffer.append("singleValueExtendedProperties/Any(ep: ep/id eq '").append(graphId)
-                            .append("' and cast(ep/value,Edm.DateTimeOffset) ").append(convertOperator(operator)).append(" datetimeoffset'").append(StringUtil.escapeQuotes(value)).append("')");
+                            .append("' and cast(ep/value,Edm.DateTimeOffset) ").append(convertOperator(operator)).append(" ").append(StringUtil.escapeQuotes(value)).append(")");
                 } else if (field.isBoolean()) {
                     buffer.append("singleValueExtendedProperties/Any(ep: ep/id eq '").append(graphId)
                             .append("' and cast(ep/value,Edm.Boolean) ").append(convertOperator(operator)).append(" ").append(value).append(")");
@@ -3165,6 +3412,29 @@ public class GraphExchangeSession extends ExchangeSession {
     }
 
     @Override
+    public List<ExchangeSession.Folder> getSubContactFolders(String folderPath, boolean recursive) throws IOException {
+        Folder parentFolder = internalGetFolder(folderPath);
+
+        GraphRequestBuilder httpRequestBuilder = new GraphRequestBuilder();
+        // search contact folders
+        httpRequestBuilder.setMethod(HttpGet.METHOD_NAME)
+                .setObjectType("contactFolders")
+                .setObjectId(parentFolder.folderId.id)
+                .setChildType("childFolders");
+
+        GraphIterator graphIterator = executeSearchRequest(httpRequestBuilder);
+        List<ExchangeSession.Folder> folders = new ArrayList<>();
+        while (graphIterator.hasNext()) {
+            Folder folder = buildFolder(graphIterator.next());
+            folder.folderPath = folder.displayName;
+            // contactFolders endpoint does not return folderClass, set it explicitly
+            folder.folderClass = "IPF.Contact";
+            folders.add(folder);
+        }
+        return folders;
+    }
+
+    @Override
     public List<ExchangeSession.Folder> getSubFolders(String folderPath, Condition condition, boolean recursive) throws IOException {
 
         List<ExchangeSession.Folder> folders = new ArrayList<>();
@@ -3235,6 +3505,24 @@ public class GraphExchangeSession extends ExchangeSession {
     }
 
     @Override
+    public boolean refreshFolder(ExchangeSession.Folder currentFolder) throws IOException {
+        // when delta sync is active, skip the ctag/count check and use delta sync directly
+        Folder graphFolder = (Folder) currentFolder;
+        MessageList messageList = (MessageList) messagesListMap.get(graphFolder.folderId.id);
+        if (messageList != null && messageList.deltaLink != null) {
+            int previousCount = currentFolder.messageCount;
+            TreeMap<Long, String> previousFlagMap = currentFolder.getImapFlagMap();
+            currentFolder.refreshMessages();
+            // detect changes by comparing count and flags
+            return currentFolder.messageCount != previousCount
+                    || !previousFlagMap.equals(currentFolder.getImapFlagMap());
+        } else {
+            // fall back to ctag/count based refresh for non-delta folders
+            return super.refreshFolder(currentFolder);
+        }
+    }
+
+    @Override
     protected Folder internalGetFolder(String folderPath) throws IOException {
         FolderId folderId = getFolderId(folderPath);
 
@@ -3279,13 +3567,13 @@ public class GraphExchangeSession extends ExchangeSession {
                 folder.isDefaultCalendar = jsonResponse.optBoolean("isDefaultCalendar");
             } else {
                 String wellKnownName = wellKnownFolderMap.get(jsonResponse.optString("wellKnownName"));
-                if (ExchangeSession.INBOX.equals(wellKnownName)) {
+                if (wellKnownName != null) {
+                    // normalize display name to short constants for consistency across backends
                     folder.displayName = wellKnownName;
-                } else {
-                    if (wellKnownName != null) {
+                    if (SPECIAL.contains(wellKnownName)) {
                         folder.setSpecialFlag(wellKnownName);
                     }
-
+                } else {
                     folder.displayName = StringUtil.encodeFolderName(jsonResponse.getString("displayName"));
                 }
 
@@ -3380,7 +3668,7 @@ public class GraphExchangeSession extends ExchangeSession {
                     // message deleted
                     Message deletedMessage = removeMessageFromList(messageList, id);
                     if (deletedMessage == null) {
-                        LOGGER.warn("Message " + id + " not found in message list");
+                        LOGGER.debug("Message " + id + " not found in message list");
                     } else {
                         LOGGER.debug("Removed message UID " + deletedMessage.imapUid+" FLAGS("+deletedMessage.getImapFlags()+") "+deletedMessage.date);
                     }
@@ -3394,8 +3682,6 @@ public class GraphExchangeSession extends ExchangeSession {
                         LOGGER.debug("Restoring imapUid " + newMessage.imapUid + " -> " + currentMessage.imapUid);
                         newMessage.imapUid = currentMessage.imapUid;
                     }
-                    newMessage.messageList = messageList;
-                    newMessage.folderId = folderId;
                     messageList.add(newMessage);
                     if (currentMessage == null) {
                         LOGGER.debug("Inserted message UID " + newMessage.imapUid + " FLAGS (" + newMessage.getImapFlags()+") " + newMessage.date);
@@ -3455,16 +3741,16 @@ public class GraphExchangeSession extends ExchangeSession {
         String[] folderNames;
         FolderId currentFolderId;
 
-        // TODO test various use cases
         if ("/public".equals(folderPath)) {
             throw new UnsupportedOperationException("public folders not supported on Graph");
         } else if ("/archive".equals(folderPath)) {
-            return getWellKnownFolderId(mailbox, WellKnownFolderName.archive);
+            throw new UnsupportedOperationException("archive folders not (yet) supported on Graph");
         } else if (isSubFolderOf(folderPath, PUBLIC_ROOT)) {
             throw new UnsupportedOperationException("public folders not supported on Graph");
         } else if (isSubFolderOf(folderPath, ARCHIVE_ROOT)) {
-            currentFolderId = getWellKnownFolderId(mailbox, WellKnownFolderName.archive);
-            folderNames = folderPath.substring(ARCHIVE_ROOT.length()).split("/");
+            throw new UnsupportedOperationException("archive folders not (yet) supported on Graph");
+            // currentFolderId = TBD;
+            // folderNames = folderPath.substring(ARCHIVE_ROOT.length()).split("/");
         } else if (isSubFolderOf(folderPath, INBOX) ||
                 isSubFolderOf(folderPath, LOWER_CASE_INBOX) ||
                 isSubFolderOf(folderPath, MIXED_CASE_INBOX)) {
@@ -3911,7 +4197,7 @@ public class GraphExchangeSession extends ExchangeSession {
     @Override
     public List<ExchangeSession.Event> getAllEvents(String folderPath) throws IOException {
         // list events with minimal information
-        List<ExchangeSession.Event> results = searchEvents(folderPath, false, getCalendarItemCondition(getPastDelayCondition("dtstart")));
+        List<ExchangeSession.Event> results = searchEvents(folderPath, false, getPastDelayCalendarItemCondition());
 
         if (!Settings.getBooleanProperty("davmail.caldavDisableTasks", false) && isMainCalendar(folderPath)) {
             // retrieve tasks from main tasks folder
@@ -3937,6 +4223,24 @@ public class GraphExchangeSession extends ExchangeSession {
     protected Condition getCalendarItemCondition(Condition dateCondition) {
         return or(isTrue("isrecurring"),
                 and(isFalse("isrecurring"), dateCondition));
+    }
+
+    /**
+     * Condition to list all events: non recurring events newer than the past delay limit,
+     * recurring events unless the series ended before the limit.
+     * Only used to list the calendar, time range searches keep all recurring events.
+     *
+     * @return calendar item condition
+     */
+    private Condition getPastDelayCalendarItemCondition() {
+        // recurrence end (PidLidClipEnd) must be after the past delay limit, no end series use a far future date
+        Condition recurrenceEndCondition = getPastDelayCondition("clipend");
+        if (recurrenceEndCondition == null) {
+            // no past delay limit, keep all events
+            return getCalendarItemCondition(null);
+        }
+        return or(and(isTrue("isrecurring"), recurrenceEndCondition),
+                and(isFalse("isrecurring"), getPastDelayCondition("dtstart")));
     }
 
     /**
@@ -4063,8 +4367,7 @@ public class GraphExchangeSession extends ExchangeSession {
 
             while (graphIterator.hasNext()) {
                 JSONObject jsonResponse = graphIterator.next();
-                GraphExchangeSession.Message message = buildMessage(jsonResponse);
-                message.folderId = folderId;
+                GraphExchangeSession.Message message = buildMessage(folderId, jsonResponse);
                 LOGGER.debug("searchEventMessages " + message.contentClass + " " + message.id);
                 try {
                     byte[] content = getContent(message);
@@ -4631,6 +4934,11 @@ public class GraphExchangeSession extends ExchangeSession {
     }
 
     @Override
+    public boolean supportsPeopleSearch() {
+        return true;
+    }
+
+    @Override
     public Map<String, ExchangeSession.Contact> galFind(Condition condition, Set<String> returningAttributes, int sizeLimit) throws IOException {
         Map<String, ExchangeSession.Contact> contacts = new HashMap<>();
 
@@ -4641,7 +4949,9 @@ public class GraphExchangeSession extends ExchangeSession {
             if ("imapUid".equals(((AttributeCondition) condition).getAttributeName())) {
                 id = ((AttributeCondition) condition).getValue();
             } else {
-                search = ((AttributeCondition) condition).getValue();
+                String value = ((AttributeCondition) condition).getValue();
+                // empty or null search means broad people query (no $search param)
+                search = (value != null && !value.isEmpty()) ? value : null;
             }
         }
 
@@ -4671,11 +4981,13 @@ public class GraphExchangeSession extends ExchangeSession {
             }
 
         } else {
+            // X-PeopleQuery-QuerySources can be Mailbox, Directory or both, Mailbox already returned by searchContacts
             GraphRequestBuilder httpRequestBuilder = new GraphRequestBuilder()
                     .setMethod(HttpGet.METHOD_NAME)
-                    .addHeader("X-PeopleQuery-QuerySources", "Mailbox,Directory")
+                    .addHeader("X-PeopleQuery-QuerySources", "Directory")
                     .setObjectType("people")
-                    .setSearch(search);
+                    .setSearch(search)
+                    .setSizeLimit(sizeLimit);
             LOGGER.debug("search users");
             GraphIterator graphIterator = executeSearchRequest(httpRequestBuilder);
 
@@ -4865,7 +5177,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 if (response.getStatusLine().getStatusCode() == HttpStatus.SC_BAD_REQUEST) {
                     LOGGER.warn(response.getStatusLine());
                 }
-                isThrottled = handleThrottling(response);
+                isThrottled = handleThrottling(request, response);
                 if (isThrottled) {
                     retryCount++;
                 } else {
@@ -4886,7 +5198,7 @@ public class GraphExchangeSession extends ExchangeSession {
      * @return returned graph object
      * @throws IOException on error
      */
-    private GraphObject executeGraphRequest(GraphRequestBuilder httpRequestBuilder) throws IOException {
+    GraphObject executeGraphRequest(GraphRequestBuilder httpRequestBuilder) throws IOException {
         GraphObject graphObject = null;
         boolean isThrottled;
         int retryCount = 0;
@@ -4903,7 +5215,7 @@ public class GraphExchangeSession extends ExchangeSession {
                 if (response.getStatusLine().getStatusCode() == HttpStatus.SC_BAD_REQUEST) {
                     LOGGER.warn("Request returned " + response.getStatusLine());
                 }
-                isThrottled = handleThrottling(response);
+                isThrottled = handleThrottling(request, response);
                 if (isThrottled) {
                     retryCount++;
                 } else {
@@ -4920,13 +5232,17 @@ public class GraphExchangeSession extends ExchangeSession {
 
     /**
      * Detect throttling and wait according to Retry-After header.
+     * Only retry non-idempotent methods (POST, PATCH, DELETE) on 429 (throttling),
+     * not on 502/503/504 which may have partially processed the request.
      * See <a href="https://learn.microsoft.com/en-us/graph/throttling">https://learn.microsoft.com/en-us/graph/throttling</a>
+     * @param request  HTTP request
      * @param response HTTP response
      * @return true if throttled, false otherwise
      */
-    private boolean handleThrottling(CloseableHttpResponse response) {
+    private boolean handleThrottling(HttpRequestBase request, CloseableHttpResponse response) {
         long retryDelay = 0;
         int statusCode = response.getStatusLine().getStatusCode();
+        boolean isIdempotent = HttpGet.METHOD_NAME.equals(request.getMethod());
         if (statusCode == HttpStatus.SC_TOO_MANY_REQUESTS) {
             LOGGER.info("Detected throttling " + response.getStatusLine());
             Header retryAfter = response.getFirstHeader("Retry-After");
@@ -4941,10 +5257,9 @@ public class GraphExchangeSession extends ExchangeSession {
                 retryDelay = 10;
             }
             waitRetryDelay(retryDelay);
-        } else if (statusCode == HttpStatus.SC_SERVICE_UNAVAILABLE
+        } else if (isIdempotent && (statusCode == HttpStatus.SC_SERVICE_UNAVAILABLE
                 || statusCode == HttpStatus.SC_BAD_GATEWAY
-                || statusCode == HttpStatus.SC_GATEWAY_TIMEOUT
-                || statusCode == HttpStatus.SC_INTERNAL_SERVER_ERROR) {
+                || statusCode == HttpStatus.SC_GATEWAY_TIMEOUT)) {
             LOGGER.info("Detected graph request error, waiting to retry " + response.getStatusLine());
             retryDelay = 10;
             waitRetryDelay(retryDelay);

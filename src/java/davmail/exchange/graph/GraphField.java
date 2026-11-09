@@ -108,10 +108,15 @@ public class GraphField {
 
         addFieldMap("instancetype", DistinguishedPropertySetType.PublicStrings, "urn:schemas:calendar:instancetype", PropertyType.Integer);
 
+        // PidLidOwnerCriticalChange: date/time the organizer sent/updated the meeting (used for DTSTAMP per MS-OXCICAL)
+        addFieldMap("dtstamp", DistinguishedPropertySetType.Meeting, 0x001A, PropertyType.SystemTime);
+
         addFieldMap("iCalUid");
         addFieldMap("calendaruid", DistinguishedPropertySetType.PublicStrings, "urn:schemas:calendar:uid", PropertyType.String);
 
         addFieldMap("isrecurring", DistinguishedPropertySetType.Appointment, 0x8223, PropertyType.Boolean); // PidLidRecurring
+        // PidLidClipEnd: end of the recurrence range, used to skip series ended before caldavPastDelay
+        addFieldMap("clipend", DistinguishedPropertySetType.Appointment, 0x8236, PropertyType.SystemTime);
 
         addFieldMap("dtstart", "start");
         addFieldMap("dtend", "end");
@@ -158,6 +163,7 @@ public class GraphField {
 
         addFieldMap("showAs");
         addFieldMap("isAllDay", "isAllDay", PropertyType.Boolean);
+        addFieldMap("isCancelled", "isCancelled", PropertyType.Boolean);
         addFieldMap("responseRequested");
         addFieldMap("responseStatus");
 
@@ -269,6 +275,9 @@ public class GraphField {
         addFieldMap("gender");// MAPI addFieldMap("gender", 0x3A4D, PropertyType.Short);
 
         addFieldMap("sensitivity", 0x0036, PropertyType.Integer);
+
+        // for events map class to sensitivity
+        addFieldMap("class", "sensitivity");
 
         // does not map to anything over graph
         addFieldMap("msexchangecertificate");

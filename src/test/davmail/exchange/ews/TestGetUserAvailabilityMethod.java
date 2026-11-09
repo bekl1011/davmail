@@ -2,6 +2,7 @@ package davmail.exchange.ews;
 
 import junit.framework.TestCase;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
@@ -13,7 +14,7 @@ public class TestGetUserAvailabilityMethod extends TestCase {
                     "2026-10-08T00:00:00Z", 15, detailed);
         }
 
-        private void parse(InputStream inputStream) {
+        private void parse(InputStream inputStream) throws IOException {
             processResponseStream(inputStream);
         }
 
@@ -22,7 +23,7 @@ public class TestGetUserAvailabilityMethod extends TestCase {
         }
     }
 
-    private List<GetUserAvailabilityMethod.CalendarEvent> parseFixture() {
+    private List<GetUserAvailabilityMethod.CalendarEvent> parseFixture() throws IOException {
         TestMethod method = new TestMethod(true);
         InputStream inputStream = getClass().getResourceAsStream("availability-detailed.xml");
         assertNotNull(inputStream);
@@ -37,7 +38,7 @@ public class TestGetUserAvailabilityMethod extends TestCase {
                 "<t:RequestedView>MergedOnly</t:RequestedView>"));
     }
 
-    public void testParseSubjectAndLocation() {
+    public void testParseSubjectAndLocation() throws Exception {
         GetUserAvailabilityMethod.CalendarEvent event = parseFixture().get(0);
         assertEquals("2026-10-01T08:00:00", event.getStart());
         assertEquals("2026-10-01T09:00:00", event.getEnd());
@@ -48,7 +49,7 @@ public class TestGetUserAvailabilityMethod extends TestCase {
         assertEquals(Boolean.TRUE, event.getMeeting());
     }
 
-    public void testParseEventWithoutDetails() {
+    public void testParseEventWithoutDetails() throws Exception {
         GetUserAvailabilityMethod.CalendarEvent event = parseFixture().get(1);
         assertNull(event.getSubject());
         assertNull(event.getLocation());
@@ -56,14 +57,14 @@ public class TestGetUserAvailabilityMethod extends TestCase {
         assertNull(event.getPrivate());
     }
 
-    public void testParsePrivateEvent() {
+    public void testParsePrivateEvent() throws Exception {
         GetUserAvailabilityMethod.CalendarEvent event = parseFixture().get(2);
         assertEquals(Boolean.TRUE, event.getPrivate());
         assertNull(event.getSubject());
         assertNull(event.getLocation());
     }
 
-    public void testParseRecurringOccurrence() {
+    public void testParseRecurringOccurrence() throws Exception {
         GetUserAvailabilityMethod.CalendarEvent event = parseFixture().get(3);
         assertEquals("AAMkARecurring", event.getId());
         assertEquals(Boolean.TRUE, event.getRecurring());

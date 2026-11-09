@@ -39,7 +39,7 @@ import java.util.ArrayList;
  * Http post request with a string response handler.
  */
 public class PostRequest extends HttpPost implements ResponseHandler<String>, ResponseWrapper {
-    private ArrayList<NameValuePair> parameters = new ArrayList<>();
+    private final ArrayList<NameValuePair> parameters = new ArrayList<>();
     private String responseBodyAsString = null;
     private HttpResponse response;
 
@@ -77,13 +77,7 @@ public class PostRequest extends HttpPost implements ResponseHandler<String>, Re
     }
 
     public void removeParameter(final String name) {
-        ArrayList<NameValuePair> toDelete = new ArrayList<>();
-        for (NameValuePair param: parameters) {
-            if (param.getName().equals(name)) {
-                toDelete.add(param);
-            }
-        }
-        parameters.removeAll(toDelete);
+        parameters.removeIf(param -> param.getName().equals(name));
     }
 
     public ArrayList<NameValuePair> getParameters() {
@@ -91,6 +85,7 @@ public class PostRequest extends HttpPost implements ResponseHandler<String>, Re
     }
 
     public String getResponseBodyAsString() throws IOException {
+        checkResponse();
         if (responseBodyAsString == null) {
             throw new IOException("No response body available");
         }

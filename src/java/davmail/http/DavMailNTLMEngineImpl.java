@@ -45,6 +45,7 @@ import java.util.Locale;
  * authentication protocol.
  * Duplicate code from NTLMEngineImpl to implement channel binding
  */
+@SuppressWarnings("unused")
 final class DavMailNTLMEngineImpl implements NTLMEngine {
 
     static final Logger LOGGER = Logger.getLogger("davmail.http.DavMailNTLMEngineImpl");
@@ -1777,9 +1778,10 @@ final class DavMailNTLMEngineImpl implements NTLMEngine {
      * Cryptography support - HMACMD5 - algorithmically based on various web
      * resources by Karl Wright
      */
-    static class HMACMD5 {
+    private static class HMACMD5 {
         protected final byte[] ipad;
         protected final byte[] opad;
+        @SuppressWarnings("java:S9428") // HMACMD5 instances are short-lived and never shared across threads
         protected final MessageDigest md5;
 
         HMACMD5(final byte[] input) {

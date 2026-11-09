@@ -21,7 +21,6 @@ package davmail.exchange.graph;
 
 import davmail.Settings;
 import davmail.exception.DavMailException;
-import davmail.exchange.VCalendar;
 import davmail.exchange.VObject;
 import davmail.exchange.VProperty;
 import davmail.util.DateUtil;
@@ -37,11 +36,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
-import java.util.ResourceBundle;
 import java.util.TimeZone;
-
-import static davmail.util.DateUtil.CALDAV_DATE_TIME;
-import static davmail.util.DateUtil.GRAPH_DATE_TIME;
 
 /**
  * Wrapper for Graph API JsonObject
@@ -162,7 +157,7 @@ public class GraphObject {
             if (field.isBoolean() && value == null) {
                 value = "false";
             }
-            getSingleValueExtendedProperties().put(new JSONObject().put("id", key).put("value", value == null ? JSONObject.NULL : value));
+            putSingleValueExtendedProperty(key, value);
         } else {
             jsonObject.put(key, value == null ? JSONObject.NULL : value);
         }
@@ -181,7 +176,7 @@ public class GraphObject {
         String key = field.getGraphId();
         // extended field values go under singleValueExtendedProperties
         if (field.isExtended()) {
-            getSingleValueExtendedProperties().put(new JSONObject().put("id", key).put("value", value));
+            putSingleValueExtendedProperty(key, value);
         } else {
             jsonObject.put(key, value);
         }
@@ -236,6 +231,25 @@ public class GraphObject {
         return singleValueExtendedProperties;
     }
 
+    /**
+     * Set or replace a single value extended property.
+     * If a property with the same id already exists, replace its value; otherwise append a new entry.
+     * @param key property id
+     * @param value property value
+     * @throws JSONException on error
+     */
+    protected void putSingleValueExtendedProperty(String key, Object value) throws JSONException {
+        JSONArray properties = getSingleValueExtendedProperties();
+        for (int i = 0; i < properties.length(); i++) {
+            JSONObject existing = properties.optJSONObject(i);
+            if (existing != null && key.equals(existing.optString("id"))) {
+                existing.put("value", value == null ? JSONObject.NULL : value);
+                return;
+            }
+        }
+        properties.put(new JSONObject().put("id", key).put("value", value == null ? JSONObject.NULL : value));
+    }
+
 
     /**
      * Get mandatory property value.
@@ -257,7 +271,7 @@ public class GraphObject {
      * @param key internal property name
      * @return value or null
      */
-    public String optString(String section, String key) {
+    public String optSectionString(String section, String key) {
         JSONObject sectionObject = jsonObject.optJSONObject(section);
         if (sectionObject != null) {
             return sectionObject.optString(key, null);

@@ -1,6 +1,10 @@
 <project name="DavMail" default="dist" basedir=".">
     <property file="user.properties"/>
-    <property name="version" value="7.0.0"/>
+    <property name="version" value="7.1.0"/>
+
+    <condition property="is.winrun4j">
+        <available file="lib/winrun4j-0.4.5.jar"/>
+    </condition>
 
     <path id="classpath">
         <fileset dir="lib">
@@ -8,6 +12,8 @@
             <!-- make sure we compile with swt gtk 64 -->
             <exclude name="swt-*-x86.jar"/>
             <exclude name="swt-*-win32-*.jar"/>
+            <!-- exclude winrun4j when not available (Linux builds) -->
+            <exclude name="winrun4j-*.jar" unless="is.winrun4j"/>
         </fileset>
     </path>
 
@@ -505,9 +511,11 @@
     </target>
 
     <target name="upload-release" depends="release">
+        <echo file="dist/readme.md">Latest release is available at https://sourceforge.net/projects/davmail/files/davmail/${version}/</echo>
         <scp todir="${username},davmail@frs.sourceforge.net:/home/frs/project/d/da/davmail/davmail"
              keyfile="${keyfile}" passphrase="${passphrase}" verbose="true" trust="true">
             <fileset dir="dist">
+                <include name="readme.md"/>
                 <include name="${version}/*"/>
             </fileset>
         </scp>
@@ -553,7 +561,7 @@
     <target name="sonar">
         <property file="sonar.properties"/>
         <property name="sonar.projectVersion" value="${version}"/>
-        <taskdef resource="org/sonar/ant/antlib.xml" classpath="lib/sonarqube-ant-task-2.7.0.1612.jar"/>
+        <taskdef resource="org/sonar/ant/antlib.xml" classpath="lib/sonarqube-ant-task-2.7.1.1951.jar"/>
         <sonar/>
     </target>
 

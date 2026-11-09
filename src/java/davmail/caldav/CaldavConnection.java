@@ -81,6 +81,12 @@ public class CaldavConnection extends AbstractConnection {
     protected static final int MAX_KEEP_ALIVE_TIME = 300;
     protected final Logger wireLogger = Logger.getLogger(this.getClass());
 
+    /**
+     * Context path for reverse proxy support, e.g. "/davmail".
+     * Stripped from incoming requests and restored in responses.
+     */
+    protected final String contextPath;
+
     protected boolean closed;
 
     /**
@@ -93,11 +99,31 @@ public class CaldavConnection extends AbstractConnection {
         ical_allowed_abs_path.clear('@');
     }
 
-    static String encodePath(CaldavRequest request, String path) {
-        if (request.isIcal5()) {
-            return URIUtil.encode(path, ical_allowed_abs_path);
+    /**
+     * Strip context path from a decoded request or destination path, reverse of encodePath.
+     *
+     * @param contextPath normalized context path, empty or starting with / and without trailing /
+     * @param path        decoded path
+     * @return path relative to context path, "/" if path is the context path itself,
+     * or null if path is not under context path
+     */
+    static String stripContextPath(String contextPath, String path) {
+        if (contextPath.isEmpty()) {
+            return path;
+        } else if (path.equals(contextPath)) {
+            return "/";
+        } else if (path.startsWith(contextPath + '/')) {
+            return path.substring(contextPath.length());
         } else {
-            return URIUtil.encodePath(path);
+            return null;
+        }
+    }
+
+    String encodePath(CaldavRequest request, String path) {
+        if (request.isIcal5()) {
+            return URIUtil.encode(contextPath + path, ical_allowed_abs_path);
+        } else {
+            return URIUtil.encodePath(contextPath + path);
         }
     }
 
@@ -110,6 +136,16 @@ public class CaldavConnection extends AbstractConnection {
         super(CaldavConnection.class.getSimpleName(), clientSocket, "UTF-8");
         // set caldav logging to davmail logging level
         wireLogger.setLevel(Settings.getLoggingLevel("davmail"));
+
+        // initialize context path for reverse proxy support, strip trailing slashes
+        String rawContextPath = Settings.getProperty("davmail.caldavContextPath", "");
+        if (!rawContextPath.isEmpty() && !rawContextPath.startsWith("/")) {
+            rawContextPath = "/" + rawContextPath;
+        }
+        while (rawContextPath.endsWith("/")) {
+            rawContextPath = rawContextPath.substring(0, rawContextPath.length() - 1);
+        }
+        contextPath = rawContextPath;
     }
 
     protected Map<String, String> parseHeaders() throws IOException {
@@ -168,7 +204,7 @@ public class CaldavConnection extends AbstractConnection {
         try {
             while (!closed) {
                 line = readClient();
-                // unable to read line, connection closed ?
+                // unable to read line, connection closed?
                 if (line == null) {
                     break;
                 }
@@ -185,7 +221,16 @@ public class CaldavConnection extends AbstractConnection {
                 Map<String, String> headers = parseHeaders();
                 String encodedPath = StringUtil.encodePlusSign(tokens.nextToken());
                 String path = URIUtil.decode(encodedPath);
+                // always consume request body first, even if request is rejected below,
+                // otherwise unread body bytes are parsed as next request on a keep alive connection
                 String content = getContent(headers.get("content-length"));
+                // strip context path for reverse proxy support
+                String strippedPath = stripContextPath(contextPath, path);
+                if (strippedPath == null) {
+                    sendErr(HttpStatus.SC_NOT_FOUND, "Request path " + path + " does not match context path " + contextPath);
+                    continue;
+                }
+                path = strippedPath;
                 setSocketTimeout(headers.get("keep-alive"));
                 // client requested connection close
                 closed = "close".equals(headers.get("connection"));
@@ -194,7 +239,7 @@ public class CaldavConnection extends AbstractConnection {
                 } else if (!headers.containsKey("authorization")) {
                     sendUnauthorized();
                 } else {
-                    // need to check session on each request, credentials may have changed or session expired
+                    // need to check session on each request, credentials may have changed, or session expired
                     try {
                         decodeCredentials(headers.get("authorization"));
                         session = ExchangeSessionFactory.getInstance(userName, password);
@@ -225,7 +270,7 @@ public class CaldavConnection extends AbstractConnection {
             try {
                 sendErr(e);
             } catch (IOException e2) {
-                DavGatewayTray.debug(new BundleMessage("LOG_EXCEPTION_SENDING_ERROR_TO_CLIENT"), e2);
+                DavGatewayTray.debug(new BundleMessage("LOG_EXCEPTION_SENDING_ERROR_TO_CLIENT"));
             }
         } finally {
             close();
@@ -246,6 +291,8 @@ public class CaldavConnection extends AbstractConnection {
         CaldavRequest request = new CaldavRequest(command, path, headers, body);
         if (request.isOptions()) {
             sendOptions();
+        } else if (request.isHead() && request.isRoot()) {
+            sendChunkedHttpResponse(HttpStatus.SC_OK, null);
         } else if (request.isPropFind() && request.isRoot()) {
             sendRoot(request);
         } else if (request.isGet() && request.isRoot()) {
@@ -445,8 +492,14 @@ public class CaldavConnection extends AbstractConnection {
             sendHttpResponse(status, null);
         } else if (request.isMove()) {
             String destinationUrl = request.getHeader("destination");
-            session.moveItem(request.path, URIUtil.decode(URI.create(destinationUrl).toURL().getPath()));
-            sendHttpResponse(HttpStatus.SC_CREATED, null);
+            // destination is a client url, it includes the context path
+            String destinationPath = stripContextPath(contextPath, URIUtil.decode(URI.create(destinationUrl).toURL().getPath()));
+            if (destinationPath == null) {
+                sendErr(HttpStatus.SC_BAD_GATEWAY, "Destination " + destinationUrl + " does not match context path " + contextPath);
+            } else {
+                session.moveItem(request.path, destinationPath);
+                sendHttpResponse(HttpStatus.SC_CREATED, null);
+            }
         } else {
             sendNotFound(request);
         }
@@ -454,7 +507,7 @@ public class CaldavConnection extends AbstractConnection {
     }
 
     private boolean isOldCardavClient(CaldavRequest request) {
-        return request.isUserAgent("iOS/");
+        return request.isUserAgent("iOS/") || request.isUserAgent("Mac OS X/") || request.isUserAgent("macOS/");
     }
 
     private String getVCardVersion(CaldavRequest request) {
@@ -595,9 +648,9 @@ public class CaldavConnection extends AbstractConnection {
         }
         if (request.hasProperty("owner")) {
             if ("users".equals(request.getPathElement(1))) {
-                response.appendHrefProperty("D:owner", "/principals/users/" + request.getPathElement(2));
+                response.appendHrefProperty("D:owner", encodePath(request, "/principals/users/" + request.getPathElement(2)));
             } else {
-                response.appendHrefProperty("D:owner", "/principals" + request.getPath());
+                response.appendHrefProperty("D:owner", encodePath(request, "/principals" + request.getPath()));
             }
         }
         if (request.hasProperty("getcontenttype")) {
@@ -612,10 +665,10 @@ public class CaldavConnection extends AbstractConnection {
                 response.appendProperty("D:getcontenttype", "text/calendar; component=vtodo");
             }
         }
-        if (request.hasProperty("getetag")) {
+        if (request.hasProperty("getetag") && folder.etag != null) {
             response.appendProperty("D:getetag", folder.etag);
         }
-        if (request.hasProperty("getctag")) {
+        if (request.hasProperty("getctag") && folder.ctag != null) {
             response.appendProperty("CS:getctag", "CS=\"http://calendarserver.org/ns/\"",
                     IOUtil.encodeBase64AsString(folder.ctag));
         }
@@ -623,12 +676,12 @@ public class CaldavConnection extends AbstractConnection {
             if (subFolder == null || subFolder.isEmpty()) {
                 // use i18n calendar name as display name
                 String displayname = request.getLastPath();
-                if ("calendar".equals(displayname)) {
+                if ("calendar".equals(displayname) || "contacts".equals(displayname)) {
                     displayname = folder.displayName;
                 }
                 response.appendProperty("D:displayname", StringUtil.xmlEncode(displayname));
             } else {
-                response.appendProperty("D:displayname", StringUtil.xmlEncode(subFolder));
+                response.appendProperty("D:displayname", StringUtil.xmlEncode(folder.displayName));
             }
         }
         if (request.hasProperty("calendar-description")) {
@@ -795,6 +848,9 @@ public class CaldavConnection extends AbstractConnection {
         if (request.getDepth() == 1) {
             if (folder.isContact()) {
                 contacts = session.getAllContacts(folderPath, !isOldCardavClient(request) && !request.isLightning());
+                if (!folderPath.startsWith("/public")) {
+                    folderList = session.getSubContactFolders(folderPath, false);
+                }
             } else if (folder.isCalendar() || folder.isTask()) {
                 events = session.getAllEvents(folderPath);
                 if (!folderPath.startsWith("/public")) {
@@ -809,6 +865,12 @@ public class CaldavConnection extends AbstractConnection {
         if (request.getDepth() == 1) {
             if (folder.isContact()) {
                 appendContactsResponses(response, request, contacts);
+                // Send sub folders for multi-addressbook support
+                if (folderList != null) {
+                    for (ExchangeSession.Folder subFolder : folderList) {
+                        appendFolderOrItem(response, request, subFolder, subFolder.folderPath.substring(subFolder.folderPath.indexOf('/') + 1), true);
+                    }
+                }
             } else if (folder.isCalendar() || folder.isTask()) {
                 appendEventsResponses(response, request, events);
                 // Send sub folders for multi-calendar support under iCal, except for public folders
@@ -939,7 +1001,9 @@ public class CaldavConnection extends AbstractConnection {
 
         // send not found events errors
         for (String href : notFound) {
-            response.startResponse(encodePath(request, href));
+            // href is sent by the client and already includes the context path, encodePath adds it back
+            String relativeHref = stripContextPath(contextPath, href);
+            response.startResponse(encodePath(request, relativeHref != null ? relativeHref : href));
             response.appendPropstatNotFound();
             response.endResponse();
         }
@@ -961,6 +1025,9 @@ public class CaldavConnection extends AbstractConnection {
 
         if (request.hasProperty("current-user-principal")) {
             response.appendHrefProperty("D:current-user-principal", encodePath(request, "/principals/users/" + session.getEmail()));
+        }
+        if (request.hasProperty("principal-URL")) {
+            response.appendHrefProperty("D:principal-URL", encodePath(request, "/principals/users/" + session.getEmail()));
         }
         response.endPropStatOK();
         response.endResponse();
@@ -1012,11 +1079,11 @@ public class CaldavConnection extends AbstractConnection {
     public void sendRoot(CaldavRequest request) throws IOException {
         CaldavResponse response = new CaldavResponse(HttpStatus.SC_MULTI_STATUS);
         response.startMultistatus();
-        response.startResponse("/");
+        response.startResponse(encodePath(request, "/"));
         response.startPropstat();
 
         if (request.hasProperty("principal-collection-set")) {
-            response.appendHrefProperty("D:principal-collection-set", "/principals/users/");
+            response.appendHrefProperty("D:principal-collection-set", encodePath(request, "/principals/users/"));
         }
         if (request.hasProperty("displayname")) {
             response.appendProperty("D:displayname", "ROOT");
@@ -1027,11 +1094,14 @@ public class CaldavConnection extends AbstractConnection {
         if (request.hasProperty("current-user-principal")) {
             response.appendHrefProperty("D:current-user-principal", encodePath(request, "/principals/users/" + session.getEmail()));
         }
+        if (request.hasProperty("principal-URL")) {
+            response.appendHrefProperty("D:principal-URL", encodePath(request, "/principals/users/" + session.getEmail()));
+        }
         response.endPropStatOK();
         response.endResponse();
         if (request.depth == 1) {
             // iPhone workaround: send calendar subfolder
-            response.startResponse("/users/" + session.getEmail() + "/calendar");
+            response.startResponse(encodePath(request, "/users/" + session.getEmail() + "/calendar"));
             response.startPropstat();
             if (request.hasProperty("resourcetype")) {
                 response.appendProperty("D:resourcetype", "<D:collection/>" +
@@ -1046,7 +1116,7 @@ public class CaldavConnection extends AbstractConnection {
             response.endPropStatOK();
             response.endResponse();
 
-            response.startResponse("/users");
+            response.startResponse(encodePath(request, "/users"));
             response.startPropstat();
             if (request.hasProperty("displayname")) {
                 response.appendProperty("D:displayname", "users");
@@ -1057,7 +1127,7 @@ public class CaldavConnection extends AbstractConnection {
             response.endPropStatOK();
             response.endResponse();
 
-            response.startResponse("/principals");
+            response.startResponse(encodePath(request, "/principals"));
             response.startPropstat();
             if (request.hasProperty("displayname")) {
                 response.appendProperty("D:displayname", "principals");
@@ -1081,7 +1151,7 @@ public class CaldavConnection extends AbstractConnection {
     public void sendDirectory(CaldavRequest request) throws IOException {
         CaldavResponse response = new CaldavResponse(HttpStatus.SC_MULTI_STATUS);
         response.startMultistatus();
-        response.startResponse("/directory/");
+        response.startResponse(encodePath(request, "/directory/"));
         response.startPropstat();
         if (request.hasProperty("current-user-privilege-set")) {
             response.appendProperty("D:current-user-privilege-set", "<D:privilege><D:read/></D:privilege>");
@@ -1099,7 +1169,7 @@ public class CaldavConnection extends AbstractConnection {
      */
     public void sendWellKnown() throws IOException {
         HashMap<String, String> headers = new HashMap<>();
-        headers.put("Location", "/");
+        headers.put("Location", contextPath + "/");
         sendHttpResponse(HttpStatus.SC_MOVED_PERMANENTLY, headers);
     }
 
@@ -1124,7 +1194,7 @@ public class CaldavConnection extends AbstractConnection {
         response.startResponse(encodePath(request, "/principals/" + prefix + '/' + principal));
         response.startPropstat();
 
-        if (request.hasProperty("principal-URL") && request.isIcal5()) {
+        if (request.hasProperty("principal-URL")) {
             response.appendHrefProperty("D:principal-URL", encodePath(request, "/principals/" + prefix + '/' + actualPrincipal));
         }
 
@@ -1162,7 +1232,7 @@ public class CaldavConnection extends AbstractConnection {
         } else {
             // public calendar, send root href as inbox url (always empty) for Lightning
             if (request.isLightning() && request.hasProperty("schedule-inbox-URL")) {
-                response.appendHrefProperty("C:schedule-inbox-URL", "/");
+                response.appendHrefProperty("C:schedule-inbox-URL", encodePath(request, "/"));
             }
             // send user outbox
             if (request.hasProperty("schedule-outbox-URL")) {
@@ -1291,7 +1361,7 @@ public class CaldavConnection extends AbstractConnection {
      */
     public void sendNotFound(CaldavRequest request) throws IOException {
         BundleMessage message = new BundleMessage("LOG_UNSUPPORTED_REQUEST", request);
-        DavGatewayTray.warn(message);
+        DavGatewayTray.debug(message);
         sendErr(HttpStatus.SC_NOT_FOUND, message.format());
     }
 
@@ -1394,8 +1464,7 @@ public class CaldavConnection extends AbstractConnection {
             sendClient("Server: DavMail Gateway " + DavGateway.getCurrentVersion());
             String scheduleMode;
             // enable automatic scheduling over EWS, can be disabled
-            if (Settings.getBooleanProperty("davmail.caldavAutoSchedule", true)
-                    && !(session instanceof DavExchangeSession)) {
+            if (!(session instanceof DavExchangeSession)) {
                 scheduleMode = "calendar-auto-schedule";
             } else {
                 scheduleMode = "calendar-schedule";
@@ -1479,7 +1548,7 @@ public class CaldavConnection extends AbstractConnection {
 
         protected CaldavRequest(String command, String path, Map<String, String> headers, String body) throws IOException {
             this.command = command;
-            this.path = path.replaceAll("//", "/");
+            this.path = path.replace("//", "/");
             pathElements = this.path.split("/");
             this.headers = headers;
             buildDepth();

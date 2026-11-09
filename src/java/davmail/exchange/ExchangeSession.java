@@ -102,7 +102,7 @@ public abstract class ExchangeSession {
     protected static final String JUNK = "Junk";
     protected static final String UNSENT = "Unsent Messages";
 
-    protected static final List<String> SPECIAL = Arrays.asList(SENT, DRAFTS, TRASH, JUNK);
+    protected static final List<String> SPECIAL = Arrays.asList(SENT, DRAFTS, TRASH, JUNK, ARCHIVE);
 
     // see https://learn.microsoft.com/en-us/openspecs/exchange_server_protocols/ms-oxomsg/87a8b6b8-59a4-4859-9dcd-8b0f36e3d729
     protected static final String REPLYTOSENDER = "102";
@@ -744,6 +744,18 @@ public abstract class ExchangeSession {
         return getSubFolders(folderName, isEqualTo("folderclass", "IPF.Appointment"), recursive);
     }
 
+    /**
+     * Get contact sub folders.
+     *
+     * @param folderName Exchange folder name
+     * @param recursive  deep search if true
+     * @return list of folders
+     * @throws IOException on error
+     */
+    public List<Folder> getSubContactFolders(String folderName, boolean recursive) throws IOException {
+        return getSubFolders(folderName, isEqualTo("folderclass", "IPF.Contact"), recursive);
+    }
+
 
     /**
      * Extract sub folder path from folder path.
@@ -1253,7 +1265,7 @@ public abstract class ExchangeSession {
             computeAttributes();
         }
 
-        protected void computeAttributes() {
+        public void computeAttributes() {
             recent = 0;
             for (Message message : messages) {
                 if (message.recent) {
@@ -1365,7 +1377,9 @@ public abstract class ExchangeSession {
             for (ExchangeSession.Message message : messages) {
                 imapFlagMap.put(message.getImapUid(), message.getImapFlags());
             }
-            LOGGER.debug("imapFlagMap size: " + previousMessageCount + " -> " + imapFlagMap.size());
+            if (previousMessageCount != imapFlagMap.size()) {
+                LOGGER.debug("imapFlagMap size: " + previousMessageCount + " -> " + imapFlagMap.size());
+            }
         }
 
         /**
@@ -1824,6 +1838,11 @@ public abstract class ExchangeSession {
          */
         protected transient byte[] cachedMimeContent;
 
+        @Override
+        public boolean add(Message message) {
+            message.messageList = this;
+            return super.add(message);
+        }
     }
 
     /**
@@ -2018,9 +2037,16 @@ public abstract class ExchangeSession {
             writer.appendProperty("N", sn, get("givenName"), get("middlename"), get("personaltitle"), get("namesuffix"));
 
             if (distributionListMembers != null) {
-                writer.appendProperty("KIND", "group");
-                for (String member : distributionListMembers) {
-                    writer.appendProperty("MEMBER", member);
+                if ("3.0".equals(vCardVersion)) {
+                    writer.appendProperty("X-ADDRESSBOOKSERVER-KIND", "group");
+                    for (String member : distributionListMembers) {
+                        writer.appendProperty("X-ADDRESSBOOKSERVER-MEMBER", member);
+                    }
+                } else {
+                    writer.appendProperty("KIND", "group");
+                    for (String member : distributionListMembers) {
+                        writer.appendProperty("MEMBER", member);
+                    }
                 }
             }
 
@@ -2107,7 +2133,17 @@ public abstract class ExchangeSession {
             }
 
             if (contactPhoto != null) {
-                writer.writeLine("PHOTO:data:"+contactPhoto.contentType+";base64," +contactPhoto.content);
+                if ("3.0".equals(vCardVersion)) {
+                    // vCard 3.0: use ENCODING=b and TYPE parameter
+                    String photoType = contactPhoto.contentType;
+                    if (photoType != null && photoType.startsWith("image/")) {
+                        photoType = photoType.substring("image/".length()).toUpperCase();
+                    }
+                    writer.writeLine("PHOTO;ENCODING=b;TYPE=" + photoType + ":" + contactPhoto.content);
+                } else {
+                    // vCard 4.0: use data: URI
+                    writer.writeLine("PHOTO:data:" + contactPhoto.contentType + ";base64," + contactPhoto.content);
+                }
             }
 
             writer.appendProperty("KEY1;X509;ENCODING=BASE64", get("msexchangecertificate"));
@@ -2763,6 +2799,44 @@ public abstract class ExchangeSession {
         }
     }
 
+    /**
+     * Select the contact field matching a vCard TEL property.
+     * Exchange supports one value per phone type, plus a secondary business and home phone.
+     * Specific types (fax, pager, car) are tested before generic work and home types:
+     * a work fax is TEL;TYPE=work;TYPE=fax and is a fax, not a business phone.
+     *
+     * @param property   vCard TEL property
+     * @param properties contact properties already collected, used to select primary or secondary phone
+     * @return contact field name, or null if there is no room left for this phone number
+     */
+    protected static String getContactPhoneField(VProperty property, Map<String, String> properties) {
+        if (property.hasParam("TYPE", "cell") || property.hasParam("X-GROUP", "cell")) {
+            return "mobile";
+        } else if (property.hasParam("TYPE", "fax")) {
+            return property.hasParam("TYPE", "home") ? "homefax" : "facsimiletelephonenumber";
+        } else if (property.hasParam("TYPE", "pager")) {
+            return "pager";
+        } else if (property.hasParam("TYPE", "car")) {
+            return "othermobile";
+        } else if (property.hasParam("TYPE", "work") || property.hasParam("X-GROUP", "work")) {
+            return firstAvailable(properties, "telephoneNumber", "otherBusinessTelephoneNumber");
+        } else if (property.hasParam("TYPE", "home") || property.hasParam("X-GROUP", "home")) {
+            return firstAvailable(properties, "homePhone", "otherHomePhone");
+        } else {
+            return "otherTelephone";
+        }
+    }
+
+    private static String firstAvailable(Map<String, String> properties, String primary, String secondary) {
+        if (!properties.containsKey(primary)) {
+            return primary;
+        } else if (!properties.containsKey(secondary)) {
+            return secondary;
+        } else {
+            return null;
+        }
+    }
+
     protected ItemResult createOrUpdateContact(String folderPath, String itemName, String itemBody, String etag, String noneMatch) throws IOException {
         // parse VCARD body to build contact property map
         Map<String, String> properties = new HashMap<>();
@@ -2786,43 +2860,11 @@ public abstract class ExchangeSession {
                 } else if ("NICKNAME".equals(property.getKey())) {
                     properties.put("nickname", property.getValue());
                 } else if ("TEL".equals(property.getKey())) {
-                    if (property.hasParam("TYPE", "cell") || property.hasParam("X-GROUP", "cell")) {
-                        properties.put("mobile", property.getValue());
-                    } else if (property.hasParam("TYPE", "work") || property.hasParam("X-GROUP", "work")) {
-                        if (properties.containsKey("telephoneNumber")) {
-                            if (properties.containsKey("otherBusinessTelephoneNumber")) {
-                                LOGGER.warn("Ignore third work phone  " + property.getValue());
-                            } else {
-                                // secondary business phone
-                                properties.put("otherBusinessTelephoneNumber", property.getValue());
-                            }
-                        } else {
-                            properties.put("telephoneNumber", property.getValue());
-                        }
-                    } else if (property.hasParam("TYPE", "home") || property.hasParam("X-GROUP", "home")) {
-                        if (properties.containsKey("homePhone")) {
-                            if (properties.containsKey("otherHomePhone")) {
-                                LOGGER.warn("Ignore third home phone  " + property.getValue());
-                            } else {
-                                // secondary home phone
-                                properties.put("otherHomePhone", property.getValue());
-                            }
-                        } else {
-                            properties.put("homePhone", property.getValue());
-                        }
-
-                    } else if (property.hasParam("TYPE", "fax")) {
-                        if (property.hasParam("TYPE", "home")) {
-                            properties.put("homefax", property.getValue());
-                        } else {
-                            properties.put("facsimiletelephonenumber", property.getValue());
-                        }
-                    } else if (property.hasParam("TYPE", "pager")) {
-                        properties.put("pager", property.getValue());
-                    } else if (property.hasParam("TYPE", "car")) {
-                        properties.put("othermobile", property.getValue());
+                    String phoneField = getContactPhoneField(property, properties);
+                    if (phoneField != null) {
+                        properties.put(phoneField, property.getValue());
                     } else {
-                        properties.put("otherTelephone", property.getValue());
+                        LOGGER.warn("Ignore additional phone number " + property.getValue());
                     }
                 } else if ("ADR".equals(property.getKey())) {
                     // address
@@ -3058,6 +3100,16 @@ public abstract class ExchangeSession {
      */
     public String getAlias() {
         return alias;
+    }
+
+    /**
+     * Check if the backend supports native people/directory search (e.g. Graph People API).
+     * When true, the LDAP layer can issue a single broad search instead of iterating A-to-Z.
+     *
+     * @return true if backend supports native people search
+     */
+    public boolean supportsPeopleSearch() {
+        return false;
     }
 
     /**

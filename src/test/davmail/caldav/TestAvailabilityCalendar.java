@@ -6,6 +6,7 @@ import davmail.exchange.ews.GetUserAvailabilityMethod;
 import davmail.http.URIUtil;
 import junit.framework.TestCase;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.util.Date;
 import java.util.HashMap;
@@ -18,12 +19,12 @@ public class TestAvailabilityCalendar extends TestCase {
                     "2026-10-08T00:00:00Z", 15, true);
         }
 
-        private void parse(InputStream inputStream) {
+        private void parse(InputStream inputStream) throws IOException {
             processResponseStream(inputStream);
         }
     }
 
-    private List<GetUserAvailabilityMethod.CalendarEvent> parseFixture() {
+    private List<GetUserAvailabilityMethod.CalendarEvent> parseFixture() throws IOException {
         TestMethod method = new TestMethod();
         InputStream inputStream = getClass().getResourceAsStream(
                 "/davmail/exchange/ews/availability-detailed.xml");
@@ -36,7 +37,7 @@ public class TestAvailabilityCalendar extends TestCase {
         return AvailabilityCalendar.build("user@example.org", parseFixture(), new Date(0));
     }
 
-    public void testStableUid() {
+    public void testStableUid() throws Exception {
         GetUserAvailabilityMethod.CalendarEvent event = parseFixture().get(3);
         assertEquals(AvailabilityCalendar.buildUid("user@example.org", event),
                 AvailabilityCalendar.buildUid("user@example.org", event));

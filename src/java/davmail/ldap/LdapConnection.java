@@ -55,6 +55,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -1035,6 +1036,13 @@ public class LdapConnection extends AbstractConnection {
         boolean isFullSearch();
 
         boolean isMatch(ExchangeSession.Contact person);
+
+        /**
+         * Collect distinct non-wildcard search values from this filter tree.
+         *
+         * @param values set to collect values into
+         */
+        void collectSearchValues(Set<String> values);
     }
 
     class CompoundFilter implements LdapFilter {
@@ -1160,6 +1168,28 @@ public class LdapConnection extends AbstractConnection {
         public Map<String, ExchangeSession.Contact> findInGAL(ExchangeSession session, Set<String> returningAttributes, int sizeLimit) throws IOException {
             Map<String, ExchangeSession.Contact> persons = null;
 
+            if (type == LDAP_FILTER_AND && session.supportsPeopleSearch()) {
+                // People API supports multi-word search natively.
+                // Extract distinct search values from child OR groups and issue a single query
+                // instead of N*M redundant identical API calls.
+                Set<String> searchTerms = new LinkedHashSet<>();
+                collectSearchValues(searchTerms);
+                if (!searchTerms.isEmpty()) {
+                    String combinedSearch = String.join(" ", searchTerms);
+                    Map<String, ExchangeSession.Contact> galPersons = session.galFind(
+                            session.startsWith("cn", combinedSearch),
+                            convertLdapToContactReturningAttributes(returningAttributes), sizeLimit);
+                    // post-filter against the full compound filter
+                    persons = new HashMap<>();
+                    for (ExchangeSession.Contact person : galPersons.values()) {
+                        if (isMatch(person)) {
+                            persons.put(person.get("uid"), person);
+                        }
+                    }
+                    return persons;
+                }
+            }
+
             for (LdapFilter child : criteria) {
                 int currentSizeLimit = sizeLimit;
                 if (persons != null) {
@@ -1196,6 +1226,12 @@ public class LdapConnection extends AbstractConnection {
             }
 
             return persons;
+        }
+
+        public void collectSearchValues(Set<String> values) {
+            for (LdapFilter child : criteria) {
+                child.collectSearchValues(values);
+            }
         }
     }
 
@@ -1329,8 +1365,13 @@ public class LdapConnection extends AbstractConnection {
             String contactAttributeName = getContactAttributeName(attributeName);
 
             if (contactAttributeName != null) {
-                // quick fix for cn=* filter
-                Map<String, ExchangeSession.Contact> galPersons = session.galFind(session.startsWith(contactAttributeName, "*".equals(value) ? "A" : value),
+                // for wildcard searches, use empty string on backends with native people search,
+                // fall back to "A" prefix on legacy backends (old OWA galfind workaround)
+                String searchValue = value;
+                if ("*".equals(value)) {
+                    searchValue = session.supportsPeopleSearch() ? "" : "A";
+                }
+                Map<String, ExchangeSession.Contact> galPersons = session.galFind(session.startsWith(contactAttributeName, searchValue),
                         convertLdapToContactReturningAttributes(returningAttributes), sizeLimit);
 
                 if (operator == LDAP_FILTER_EQUALITY) {
@@ -1341,6 +1382,18 @@ public class LdapConnection extends AbstractConnection {
                     for (ExchangeSession.Contact person : galPersons.values()) {
                         if (isMatch(person)) {
                             // Found an exact match
+                            results.put(person.get("uid"), person);
+                        }
+                    }
+
+                    return results;
+                } else if (session.supportsPeopleSearch()) {
+                    // People API returns fuzzy/relevance-based results,
+                    // post-filter to ensure they match the original LDAP filter
+                    Map<String, ExchangeSession.Contact> results = new HashMap<>();
+
+                    for (ExchangeSession.Contact person : galPersons.values()) {
+                        if (isMatch(person)) {
                             results.put(person.get("uid"), person);
                         }
                     }
@@ -1357,6 +1410,12 @@ public class LdapConnection extends AbstractConnection {
         public void add(LdapFilter filter) {
             // Should never be called
             DavGatewayTray.error(new BundleMessage("LOG_LDAP_UNSUPPORTED_FILTER", "nested simple filters"));
+        }
+
+        public void collectSearchValues(Set<String> values) {
+            if (!canIgnore && value != null && !STAR.equals(value)) {
+                values.add(value);
+            }
         }
     }
 
@@ -1509,9 +1568,10 @@ public class LdapConnection extends AbstractConnection {
                                 }
                             }
                             // full search
-                            for (char c = 'A'; c <= 'Z'; c++) {
+                            if (session.supportsPeopleSearch()) {
+                                // backend supports native broad search (e.g. Graph People API), single call
                                 if (!abandon && persons.size() < sizeLimit) {
-                                    for (ExchangeSession.Contact person : session.galFind(session.startsWith("cn", String.valueOf(c)),
+                                    for (ExchangeSession.Contact person : session.galFind(session.startsWith("cn", ""),
                                             convertLdapToContactReturningAttributes(returningAttributes), sizeLimit).values()) {
                                         persons.put(person.get("uid"), person);
                                         if (persons.size() == sizeLimit) {
@@ -1519,8 +1579,21 @@ public class LdapConnection extends AbstractConnection {
                                         }
                                     }
                                 }
-                                if (persons.size() == sizeLimit) {
-                                    break;
+                            } else {
+                                // legacy backends: iterate A-Z to retrieve GAL entries
+                                for (char c = 'A'; c <= 'Z'; c++) {
+                                    if (!abandon && persons.size() < sizeLimit) {
+                                        for (ExchangeSession.Contact person : session.galFind(session.startsWith("cn", String.valueOf(c)),
+                                                convertLdapToContactReturningAttributes(returningAttributes), sizeLimit).values()) {
+                                            persons.put(person.get("uid"), person);
+                                            if (persons.size() == sizeLimit) {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    if (persons.size() == sizeLimit) {
+                                        break;
+                                    }
                                 }
                             }
                         } else {
